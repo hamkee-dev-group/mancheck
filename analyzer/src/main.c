@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "mc_ts.h"
+#include "mc_rules.h"
 #include "mc_db_integration.h"
 #include "report.h"
 #include "mc_preproc.h"
@@ -11,7 +12,7 @@ static void
 print_usage(const char *prog)
 {
     fprintf(stderr,
-            "Usage: %s [--json] [--db PATH | --no-db] [--dump-views PATH] <c-file> [c-file...]\n",
+            "Usage: %s [--json] [--db PATH | --no-db] [--specdb PATH] [--dump-views PATH] <c-file> [c-file...]\n",
             prog);
 }
 
@@ -96,11 +97,18 @@ main_on_views(struct mc_preproc_hook *hook,
     mc_db_run_begin(ctx->dbctx, &dbrun, path);
     mc_report_set_db(ctx->dbctx, &dbrun);
 
+    /* Use preprocessed source (_ex variants) when available */
+    const char *pp_src = views->src_pp_user;
+    size_t pp_len = pp_src ? strlen(pp_src) : 0;
+    const unsigned *lmap = views->pp_user_line_map;
+    size_t lmap_count = views->pp_user_line_count;
+
     if (!ctx->json_mode) {
         /* Text mode: warnings only, track issue count in DB run */
         mc_report_reset_run_counters();
 
-        if (!mc_ts_report_unchecked_calls(path)) {
+        if (!mc_ts_report_unchecked_calls_ex(path, pp_src, pp_len,
+                                             lmap, lmap_count)) {
             fprintf(stderr, "analyzer: failed on %s\n", path);
             ctx->exit_status = 1;
         }
@@ -113,7 +121,8 @@ main_on_views(struct mc_preproc_hook *hook,
             printf(",\n");
         ctx->first_json = 0;
 
-        if (!mc_ts_report_file_json(path)) {
+        if (!mc_ts_report_file_json_ex(path, pp_src, pp_len,
+                                       lmap, lmap_count)) {
             fprintf(stderr, "\n/* analyzer: failed on %s */\n", path);
             ctx->exit_status = 1;
         }
@@ -135,6 +144,7 @@ main(int argc, char **argv)
 
     int json = 0;
     const char *db_path = "mancheck.db"; /* default DB path; NULL = disabled */
+    const char *specdb_path = NULL;
     const char *dump_views_path = NULL;
 
     /* First pass: parse options anywhere, collect file args separately */
@@ -159,6 +169,13 @@ main(int argc, char **argv)
             db_path = argv[++i];
         } else if (strcmp(arg, "--no-db") == 0) {
             db_path = NULL;
+        } else if (strcmp(arg, "--specdb") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "%s: --specdb requires a path argument\n", argv[0]);
+                free(files);
+                return 1;
+            }
+            specdb_path = argv[++i];
         } else if (strcmp(arg, "--dump-views") == 0) {
             if (i + 1 >= argc) {
                 fprintf(stderr, "%s: --dump-views requires a path argument\n",
@@ -198,6 +215,16 @@ main(int argc, char **argv)
         }
     } else {
         mc_db_ctx_init(&dbctx, NULL);
+    }
+
+    /* Optional: load specdb for rule augmentation */
+    if (specdb_path) {
+        if (mc_rules_init_specdb(specdb_path) != 0) {
+            fprintf(stderr,
+                    "warning: failed to load specdb '%s'; "
+                    "specdb-based rules disabled\n",
+                    specdb_path);
+        }
     }
 
     /* Optional: open dump-views JSONL file */
@@ -286,6 +313,7 @@ main(int argc, char **argv)
     free(metas);
     if (dump_views)
         (void)fclose(dump_views);
+    mc_rules_close_specdb();
     mc_db_ctx_close(&dbctx);
     return exit_status;
 }

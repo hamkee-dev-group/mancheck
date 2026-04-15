@@ -1,277 +1,239 @@
 # mancheck
 
-**mancheck** is a static analysis tool for C that checks code against the
-**documented contracts of standard library and system calls**, as described
-in Unix manpages.
+A static analysis tool for C that checks code against the documented contracts
+of standard library and system calls, as described in Unix manpages.
 
-Instead of heuristics, mancheck answers questions like:
+```
+example.c:4:5: ignored return of read(): unchecked return value of read()
+example.c:9:5: warning: use of dangerous function gets()
+example.c:12:5: warning: non-literal format string in printf()
+```
 
-- Is the return value of `read()` checked?
-- Is `chmod()` checked correctly according to its manpage?
-- Is an error-signaling convention being misused?
+## What it checks
 
-The tool is **manpage-driven** and **contract-based**.
+- **Unchecked return values** -- `read()`, `malloc()`, `fopen()`, `pthread_create()`, and ~150 other functions whose manpages say the return value signals success or failure.
+- **Dangerous functions** -- `gets()`, `strcpy()`, `sprintf()`, `strtok()`, and others that are inherently unsafe.
+- **Format string misuse** -- non-literal format arguments to `printf()`, `scanf()`, `snprintf()`, etc.
+- **malloc size mismatch** -- `malloc(sizeof(p))` where `sizeof(*p)` was likely intended.
+- **Double close** -- calling `close()` or `fclose()` twice on the same descriptor/handle.
 
----
+When connected to **specdb** (a database of parsed manpages), the analyzer
+automatically extends its coverage to any function that has a documented
+RETURN VALUE section -- over 2500 additional functions without maintaining
+a hand-written list.
 
-## Overview
-
-mancheck consists of three components:
+## Project structure
 
 ```
 mancheck/
-├── analyzer/      # C analyzer (tree-sitter based)
-├── specdb/        # Manpage-derived contract database
-├── mc_tests/      # Integration & golden tests
+  analyzer/       C analyzer (tree-sitter based)
+  specdb/         Manpage contract database + builder
+  mc_tests/       Integration and golden tests (73 assertions)
+  vendor/         Vendored tree-sitter runtime and C grammar
+  Makefile        Top-level build
 ```
-
-### High-level pipeline
-
-```
-manpages ──▶ specdb-build ──▶ spec.db
-                                │
-                                ▼
-                          analyzer + C code
-                                │
-                                ▼
-                     diagnostics / JSON / SQLite
-```
-
-There are **two databases by design**:
-
-- **specdb** (static): function contracts extracted from manpages
-- **run database** (dynamic): results of a single analyzer run
-
----
 
 ## Requirements
 
-- POSIX system (Linux, OpenBSD, macOS)
-- C compiler
-- `make`
-- `sqlite3`
-- Manpages installed (`man`, `man -k`)
+- Linux or macOS (POSIX)
+- C11 compiler (gcc or clang)
+- make
+- libsqlite3 development headers (`libsqlite3-dev` / `sqlite3-dev`)
+- sqlite3 CLI (for tests)
+- Manpages installed (for populating specdb)
 
-Tree-sitter and the C grammar are vendored — no external runtime dependencies.
-
----
+Tree-sitter and the C grammar are vendored as git submodules. No other
+external dependencies.
 
 ## Building
 
-### Build the analyzer
+```sh
+git clone --recurse-submodules <repo-url>
+cd mancheck
+make            # builds specdb (library + specdb-build) then the analyzer
+make test       # builds then runs the full test suite
+make clean      # cleans all build artifacts
+```
+
+This produces two binaries:
+
+- `analyzer/analyzer` -- the static analyzer
+- `specdb/specdb-build` -- standalone tool for building/updating the manpage database
+
+## Quick start
+
+Analyze a file using the built-in rule table (no setup required):
 
 ```sh
-cd analyzer
-make
+./analyzer/analyzer --no-db example.c
 ```
 
-This produces:
-
-```
-analyzer/analyzer
-```
-
-### Build the spec database tool
+For broader coverage, build a specdb from your system's manpages:
 
 ```sh
-cd specdb
-make
+./specdb/specdb-build specdb/data/spec.db --scan-section 2
+./specdb/specdb-build specdb/data/spec.db --scan-section 3
 ```
 
-This produces:
-
-```
-specdb/specdb-build
-```
-
----
-
-## Step 1: Build a spec database
-
-The analyzer **requires a spec database**.  
-It will not do anything useful without one.
-
-### Minimal example (recommended)
-
-Build a database for a small, explicit set of functions:
+Then analyze with `--specdb`:
 
 ```sh
-./specdb/specdb-build spec.db 2 read write open close chmod
+./analyzer/analyzer --no-db --specdb specdb/data/spec.db example.c
 ```
 
-Arguments:
-- `spec.db` → output database
-- `2` → man section (system calls)
-- remaining arguments → function names
+## Usage
 
-This is the **best way to start**: small, predictable, and debuggable.
+```
+analyzer [options] <file.c> [file.c ...]
+```
 
----
+| Option | Description |
+|---|---|
+| `--specdb PATH` | Load manpage database for extended rule coverage |
+| `--db PATH` | Write run results to a SQLite database (default: `mancheck.db`) |
+| `--no-db` | Disable the run database entirely |
+| `--json` | Output results as JSON instead of text |
+| `--dump-views PATH` | Dump internal preprocessing views as JSONL (for debugging) |
 
-### Scan a whole man section (advanced)
+### Examples
 
 ```sh
-./specdb/specdb-build spec.db --scan-section 2
+# Basic analysis, text output
+./analyzer/analyzer --no-db src/*.c
+
+# With specdb + run database
+./analyzer/analyzer --specdb specdb/data/spec.db --db results.db src/*.c
+
+# JSON output for tooling
+./analyzer/analyzer --json --no-db --specdb specdb/data/spec.db src/*.c
 ```
 
-This indexes everything reported by:
+## How rules work
 
-```
-man -k . 2
-```
+The analyzer uses two rule sources:
 
-⚠️ This creates a large database and may introduce noisy rules.
+1. **Static table** (~150 functions) -- compiled into the analyzer with hand-curated flags: `RETVAL_MUST_CHECK`, `DANGEROUS`, `FORMAT_STRING`. This covers the most common POSIX and C standard library functions.
 
----
+2. **specdb** (optional, ~2500 functions) -- when `--specdb` is passed, any function call not found in the static table is looked up in the manpage database. If the function has a documented RETURN VALUE section, it gets `RETVAL_MUST_CHECK` automatically.
 
-### Scan all sections (not recommended initially)
+The static table always takes priority. specdb only fills in gaps.
+
+## Building the manpage database
+
+The database is not checked in (it's ~50MB and system-specific). Build it
+from your local manpages:
 
 ```sh
-./specdb/specdb-build spec.db --scan-all
+# Index specific functions
+./specdb/specdb-build specdb/data/spec.db 2 mmap munmap msync
+
+# Index an entire man section
+./specdb/specdb-build specdb/data/spec.db --scan-section 2
+./specdb/specdb-build specdb/data/spec.db --scan-section 3
+
+# Index everything (large)
+./specdb/specdb-build specdb/data/spec.db --scan-all
 ```
 
-This is primarily for experimentation.
+The database is additive -- running specdb-build multiple times merges new
+entries without removing existing ones.
 
----
+## Run database
 
-## Step 2: Run the analyzer
+When `--db` is used (or by default with `mancheck.db`), the analyzer records
+each run in a SQLite database:
 
-### Basic usage
+- **runs** table -- one row per analyzed file, with timestamp and error count
+- **facts** table -- individual findings (unchecked return, warning, etc.)
+- **facts_fts** -- full-text search index over facts
+
+This enables querying results after the fact:
 
 ```sh
-./analyzer/analyzer --db spec.db example.c
+sqlite3 results.db "SELECT * FROM facts WHERE symbol = 'read';"
+sqlite3 results.db "SELECT * FROM facts_fts WHERE facts_fts MATCH 'malloc';"
 ```
-
-This:
-- parses `example.c` using tree-sitter
-- applies rules from `spec.db`
-- prints diagnostics to stdout
-- records results in a per-run SQLite database
-
----
-
-### Analyze multiple files
-
-```sh
-./analyzer/analyzer --db spec.db src/*.c
-```
-
----
-
-### JSON output
-
-```sh
-./analyzer/analyzer --json --db spec.db example.c
-```
-
-Useful for tooling or editor integration.
-
----
-
-### Dump internal AST “views” (developer/debug)
-
-```sh
-./analyzer/analyzer --db spec.db example.c --dump-views views.jsonl
-```
-
-This emits internal tree-sitter views as JSONL.  
-This is **not user-facing**, but useful for rule development.
-
----
-
-## Output model
-
-mancheck distinguishes between **facts** and **errors**:
-
-- **Facts**: evidence that a rule matched (e.g. a call to `read()`)
-- **Errors**: violations of a documented contract
-
-Internally, each run is recorded in a SQLite database with tables such as:
-- `runs`
-- `facts`
-- `errors`
-
-Tests and tooling query this database directly.
-
----
-
-## Example
-
-```c
-#include <unistd.h>
-
-void f(int fd, char *buf) {
-    read(fd, buf, 10);   /* unchecked */
-}
-```
-
-Output:
-
-```
-example.c:4: unchecked return value from read()
-```
-
----
 
 ## Tests
 
-Integration and golden tests live in:
-
-```
-mc_tests/
+```sh
+make test
 ```
 
-Run all tests:
+The test suite (73 assertions) covers:
+
+- Golden output tests for 36 C test files
+- Database run tracking and fact recording
+- specdb core queries and coverage
+- JSON output validation
+- Multi-file analysis
+- FTS search
+- specdb-analyzer integration (with/without `--specdb`)
+
+Golden test expectations live in `mc_tests/tests/*.exp`. To rebaseline after
+intentional output changes:
 
 ```sh
-cd mc_tests
-./run.sh
+bash mc_tests/rebaseline_golden.sh
 ```
 
-This will:
-- build the analyzer if needed
-- run analysis on test files
-- query SQLite results directly
-- compare output against `.exp` files
+## Architecture
 
-If all tests pass, the system is working end-to-end.
+```
+C source file
+    |
+    v
+[preprocessor pipeline]
+    mc_load_file -> mc_preprocess_minimal -> clang -E -> user-line extraction
+    |
+    v
+[tree-sitter parser]
+    TSQuery matches call_expression nodes
+    |
+    v
+[call classification]
+    unchecked / checked_cond / stored / propagated / ignored_explicit
+    |
+    v
+[rule lookup]
+    static table -> specdb fallback (if loaded)
+    |
+    v
+[reporters]
+    text output / JSON output / SQLite facts
+```
 
----
+### Call classification
 
-## Design goals (current)
+For each function call found in the AST, the analyzer classifies how the
+return value is used:
 
-- Manpage-driven contracts
-- No heuristics
-- No CFG or whole-program analysis (yet)
-- Correctness over completeness
-- Explicit, inspectable data model (SQLite)
+| Classification | Meaning |
+|---|---|
+| `unchecked` | Return value discarded (expression statement) |
+| `checked_cond` | Used in an if/while/for condition |
+| `stored` | Assigned to a variable or passed as argument |
+| `propagated` | Returned from the enclosing function |
+| `ignored_explicit` | Cast to `(void)` -- intentional discard |
 
----
+Only `unchecked` and `ignored_explicit` trigger warnings for `RETVAL_MUST_CHECK`
+functions.
 
-## Non-goals (for now)
+## Design
 
-- Full semantic analysis
-- Alias analysis
-- Macro expansion
-- Wrapper function inference
+- **Manpage-driven**: contracts come from documentation, not heuristics
+- **Two-database model**: specdb (static, reusable) and run DB (per-analysis)
+- **Tree-sitter parsing**: fast, incremental, no build system integration needed
+- **Static table + specdb fallback**: works out of the box, improves with data
+- **SQLite everywhere**: inspectable, queryable, portable
 
-These may be explored later, but are intentionally excluded.
+## Limitations
 
----
+- No control flow analysis -- doesn't track values across branches
+- No interprocedural analysis -- doesn't follow wrapper functions
+- No macro expansion awareness -- operates on preprocessed source
+- Dangerous/format-string flags are static-table only (not inferred from manpages)
 
-## Status
+## License
 
-The core pipeline is **working and tested**.
-
-What is intentionally minimal today:
-- UX polish
-- documentation beyond this README
-- breadth of manpage coverage
-
----
-
-## Philosophy
-
-> If the manual says “you must check this”, the code should check it.
-
-mancheck exists to enforce **documented contracts**, not inferred intent.
+See individual source files for licensing information.

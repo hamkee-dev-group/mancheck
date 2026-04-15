@@ -1,0 +1,8 @@
+tests/test25_pthread_unchecked.c:11:5: ignored return of pthread_create(): unchecked return value of pthread_create()
+tests/test25_pthread_unchecked.c:12:5: ignored return of pthread_join(): unchecked return value of pthread_join()
+tests/test25_pthread_unchecked.c:13:5: ignored return of pthread_mutex_init(): unchecked return value of pthread_mutex_init()
+tests/test25_pthread_unchecked.c:14:5: ignored return of pthread_mutex_lock(): unchecked return value of pthread_mutex_lock()
+tests/test25_pthread_unchecked.c:15:5: ignored return of pthread_mutex_unlock(): unchecked return value of pthread_mutex_unlock()
+tests/test25_pthread_unchecked.c:16:5: ignored return of pthread_cond_init(): unchecked return value of pthread_cond_init()
+tests/test25_pthread_unchecked.c:17:5: ignored return of pthread_cond_wait(): unchecked return value of pthread_cond_wait()
+tests/test25_pthread_unchecked.c:18:5: ignored return of pthread_cond_signal(): unchecked return value of pthread_cond_signal()

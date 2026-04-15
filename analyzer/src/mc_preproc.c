@@ -322,6 +322,9 @@ int mc_preprocess_pp_trim_user(mc_source_views *views)
     if (!views)
         return -1;
 
+    views->pp_user_line_map = NULL;
+    views->pp_user_line_count = 0;
+
     if (!views->src_pp || !views->meta.abs_path)
     {
         views->src_pp_user = NULL;
@@ -336,11 +339,21 @@ int mc_preprocess_pp_trim_user(mc_source_views *views)
     if (!out)
         return -1;
 
+    /* Line map: grow dynamically. */
+    size_t map_cap = 256;
+    unsigned *map = malloc(map_cap * sizeof(*map));
+    if (!map) {
+        free(out);
+        return -1;
+    }
+    size_t map_len = 0;
+
     size_t oi = 0;
     const char *p = pp;
     const char *end = pp + len;
 
     char *current_file = NULL;
+    unsigned current_orig_line = 1;  /* original source line from # marker */
 
     while (p < end)
     {
@@ -353,15 +366,23 @@ int mc_preprocess_pp_trim_user(mc_source_views *views)
 
         if (line_len > 0 && line_start[0] == '#')
         {
+            /* Parse: # <linenum> "<file>" [flags]
+             * The line number tells us what original line the NEXT line is. */
             const char *q = line_start + 1;
-
-            while (q < line_end && (*q == ' ' ||
-                                    (*q >= '0' && *q <= '9')))
+            while (q < line_end && *q == ' ')
                 q++;
+
+            /* Parse the line number */
+            unsigned marker_line = 0;
+            while (q < line_end && *q >= '0' && *q <= '9') {
+                marker_line = marker_line * 10 + (unsigned)(*q - '0');
+                q++;
+            }
 
             while (q < line_end && *q == ' ')
                 q++;
 
+            /* Parse the file path */
             if (q < line_end && *q == '"')
             {
                 q++;
@@ -377,6 +398,7 @@ int mc_preprocess_pp_trim_user(mc_source_views *views)
                     {
                         free(out);
                         free(current_file);
+                        free(map);
                         return -1;
                     }
                     memcpy(path, path_start, path_len);
@@ -384,6 +406,7 @@ int mc_preprocess_pp_trim_user(mc_source_views *views)
 
                     free(current_file);
                     current_file = path;
+                    current_orig_line = marker_line;
                 }
             }
         }
@@ -391,6 +414,20 @@ int mc_preprocess_pp_trim_user(mc_source_views *views)
         {
             if (current_file && strcmp(current_file, orig) == 0)
             {
+                /* Add to line map */
+                if (map_len == map_cap) {
+                    map_cap *= 2;
+                    unsigned *tmp = realloc(map, map_cap * sizeof(*tmp));
+                    if (!tmp) {
+                        free(out);
+                        free(current_file);
+                        free(map);
+                        return -1;
+                    }
+                    map = tmp;
+                }
+                map[map_len++] = current_orig_line;
+
                 memcpy(out + oi, line_start, line_len);
                 oi += line_len;
                 if (line_end < end)
@@ -398,6 +435,8 @@ int mc_preprocess_pp_trim_user(mc_source_views *views)
                     out[oi++] = '\n';
                 }
             }
+            /* clang -E increments the original line for each output line */
+            current_orig_line++;
         }
 
         if (line_end >= end)
@@ -412,6 +451,8 @@ int mc_preprocess_pp_trim_user(mc_source_views *views)
 
     free(current_file);
     views->src_pp_user = out;
+    views->pp_user_line_map = map;
+    views->pp_user_line_count = map_len;
     return 0;
 }
 
@@ -424,6 +465,7 @@ void mc_free_source_views(mc_source_views *views)
     free(views->src_min);
     free(views->src_pp);
     free(views->src_pp_user);
+    free(views->pp_user_line_map);
 
     memset(views, 0, sizeof(*views));
 }

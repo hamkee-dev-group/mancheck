@@ -1,0 +1,4 @@
+tests/test31_dup_pipe.c:8:5: ignored return of dup(): unchecked return value of dup()
+tests/test31_dup_pipe.c:9:5: ignored return of dup2(): unchecked return value of dup2()
+tests/test31_dup_pipe.c:10:5: ignored return of pipe(): unchecked return value of pipe()
+tests/test31_dup_pipe.c:11:5: ignored return of fcntl(): unchecked return value of fcntl()

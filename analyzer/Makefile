@@ -7,6 +7,11 @@ CFLAGS  += -I../vendor/tree-sitter/lib/src
 CFLAGS  += -I../vendor/tree-sitter-c/src
 CFLAGS  += -include mc_ts_compat.h
 CFLAGS += -Ilibdb
+
+# specdb integration
+CFLAGS  += -I../specdb/src
+SPECDB_LIB = ../specdb/libspecdb.a
+
 LDLIBS  = -lsqlite3
 
 TS_LIB_SRC   = ../vendor/tree-sitter/lib/src/lib.c
@@ -28,7 +33,6 @@ SRCS = \
     libdb/mc_db.c \
     src/report.c \
     src/mc_preproc.c \
-    src/mc_driver.c \
     $(TS_LIB_SRC) \
     $(TS_C_SRCS)
 
@@ -36,8 +40,8 @@ OBJS = $(SRCS:.c=.o)
 
 all: analyzer
 
-analyzer: $(OBJS)
-	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LDLIBS)
+analyzer: $(OBJS) $(SPECDB_LIB)
+	$(CC) $(CFLAGS) -o $@ $(OBJS) $(SPECDB_LIB) $(LDLIBS)
 
 clean:
 	rm -f $(OBJS) analyzer

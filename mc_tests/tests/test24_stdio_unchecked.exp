@@ -1,0 +1,8 @@
+tests/test24_stdio_unchecked.c:5:5: ignored return of fread(): unchecked return value of fread()
+tests/test24_stdio_unchecked.c:6:5: ignored return of fwrite(): unchecked return value of fwrite()
+tests/test24_stdio_unchecked.c:7:5: ignored return of fgets(): unchecked return value of fgets()
+tests/test24_stdio_unchecked.c:8:5: ignored return of fputs(): unchecked return value of fputs()
+tests/test24_stdio_unchecked.c:9:5: ignored return of fseek(): unchecked return value of fseek()
+tests/test24_stdio_unchecked.c:10:5: ignored return of ftell(): unchecked return value of ftell()
+tests/test24_stdio_unchecked.c:11:5: ignored return of fflush(): unchecked return value of fflush()
+tests/test24_stdio_unchecked.c:12:5: ignored return of fclose(): unchecked return value of fclose()

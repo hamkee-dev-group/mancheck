@@ -1,0 +1,6 @@
+tests/test22_process_calls.c:7:5: ignored return of fork(): unchecked return value of fork()
+tests/test22_process_calls.c:8:5: ignored return of wait(): unchecked return value of wait()
+tests/test22_process_calls.c:9:5: ignored return of waitpid(): unchecked return value of waitpid()
+tests/test22_process_calls.c:10:5: ignored return of execve(): unchecked return value of execve()
+tests/test22_process_calls.c:11:5: ignored return of system(): unchecked return value of system()
+tests/test22_process_calls.c:12:5: ignored return of chdir(): unchecked return value of chdir()

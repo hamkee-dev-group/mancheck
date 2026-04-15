@@ -1,0 +1,6 @@
+tests/malloc_bad.c:10:21: stored but unchecked return value of malloc()
+tests/malloc_bad.c:11:21: stored but unchecked return value of malloc()
+tests/malloc_bad.c:13:23: stored but unchecked return value of malloc()
+tests/malloc_bad.c:14:23: stored but unchecked return value of malloc()
+tests/malloc_bad.c:10:21: malloc_size_mismatch: allocation for 'p' uses sizeof(p); did you mean sizeof(*p) or sizeof(type)?
+tests/malloc_bad.c:11:21: malloc_size_mismatch: allocation for 'q' uses sizeof(q); did you mean sizeof(*q) or sizeof(type)?

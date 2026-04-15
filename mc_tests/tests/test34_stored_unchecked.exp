@@ -1,0 +1,8 @@
+tests/test34_stored_unchecked.c:7:14: stored but unchecked return value of open()
+tests/test34_stored_unchecked.c:9:5: ignored return of read(): unchecked return value of read()
+tests/test34_stored_unchecked.c:10:5: ignored return of close(): unchecked return value of close()
+tests/test34_stored_unchecked.c:17:5: ignored return of read(): unchecked return value of read()
+tests/test34_stored_unchecked.c:18:5: ignored return of close(): unchecked return value of close()
+tests/test34_stored_unchecked.c:22:15: stored but unchecked return value of fopen()
+tests/test34_stored_unchecked.c:32:15: stored but unchecked return value of malloc()
+tests/test34_stored_unchecked.c:38:9: stored but unchecked return value of malloc()

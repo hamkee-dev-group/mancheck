@@ -225,6 +225,143 @@ static int load_function_by_id(sqlite3 *db, int function_id, struct specdb_func 
     return 0;
 }
 
+int specdb_function_has_retval(sqlite3 *db, const char *name)
+{
+    if (!db || !name) return -1;
+
+    /*
+     * Single query: join functions → function_sections, looking for a
+     * section whose name contains "RETURN VALUE".  Prefer man sections 2/3
+     * but accept any.  We only need to know if at least one row exists.
+     */
+    const char *sql =
+        "SELECT 1 FROM functions f "
+        "JOIN function_sections fs ON fs.function_id = f.id "
+        "WHERE (f.name = ?1 "
+        "       OR f.id IN (SELECT function_id FROM function_aliases "
+        "                    WHERE alias_name = ?1)) "
+        "  AND fs.section_name LIKE '%RETURN VALUE%' "
+        "LIMIT 1;";
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr, "specdb: has_retval prepare: %s\n", sqlite3_errmsg(db));
+        return -1;
+    }
+
+    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
+
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    if (rc == SQLITE_ROW)
+        return 1;   /* found with RETURN VALUE */
+    if (rc == SQLITE_DONE)
+        return 0;   /* not found or no RETURN VALUE */
+
+    fprintf(stderr, "specdb: has_retval step: %s\n", sqlite3_errmsg(db));
+    return -1;
+}
+
+int specdb_function_is_dangerous(sqlite3 *db, const char *name)
+{
+    if (!db || !name) return -1;
+
+    /*
+     * Search DESCRIPTION, NOTES, and BUGS sections for keywords that
+     * indicate a function is deprecated, unsafe, or should not be used.
+     * Case-insensitive matching via SQLite LIKE + LOWER().
+     */
+    const char *sql =
+        "SELECT 1 FROM functions f "
+        "JOIN function_sections fs ON fs.function_id = f.id "
+        "WHERE (f.name = ?1 "
+        "       OR f.id IN (SELECT function_id FROM function_aliases "
+        "                    WHERE alias_name = ?1)) "
+        "  AND fs.section_name IN ('DESCRIPTION', 'NOTES', 'BUGS', "
+        "                          'CAVEATS', 'WARNINGS') "
+        "  AND (   LOWER(fs.content) LIKE '%deprecated%' "
+        "       OR LOWER(fs.content) LIKE '%obsolete%' "
+        "       OR LOWER(fs.content) LIKE '%should not be used%' "
+        "       OR LOWER(fs.content) LIKE '%do not use%' "
+        "       OR LOWER(fs.content) LIKE '%is dangerous%' "
+        "       OR LOWER(fs.content) LIKE '%security risk%' "
+        "       OR LOWER(fs.content) LIKE '%use of this function is discouraged%' "
+        "       OR LOWER(fs.content) LIKE '%is unsafe%' "
+        "       OR LOWER(fs.content) LIKE '%never use%' "
+        "       OR LOWER(fs.content) LIKE '%avoid this function%' ) "
+        "LIMIT 1;";
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr, "specdb: is_dangerous prepare: %s\n", sqlite3_errmsg(db));
+        return -1;
+    }
+
+    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
+
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    if (rc == SQLITE_ROW)
+        return 1;
+    if (rc == SQLITE_DONE)
+        return 0;
+
+    fprintf(stderr, "specdb: is_dangerous step: %s\n", sqlite3_errmsg(db));
+    return -1;
+}
+
+int specdb_function_has_format_string(sqlite3 *db, const char *name)
+{
+    if (!db || !name) return -1;
+
+    /*
+     * Heuristic: check the SYNOPSIS section content for a prototype that
+     * is variadic (...) and has a 'format' or 'fmt' parameter, which is
+     * the standard pattern for printf/scanf-family functions.
+     */
+    const char *sql =
+        "SELECT fs.content FROM functions f "
+        "JOIN function_sections fs ON fs.function_id = f.id "
+        "WHERE (f.name = ?1 "
+        "       OR f.id IN (SELECT function_id FROM function_aliases "
+        "                    WHERE alias_name = ?1)) "
+        "  AND fs.section_name = 'SYNOPSIS';";
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr, "specdb: has_format prepare: %s\n", sqlite3_errmsg(db));
+        return -1;
+    }
+
+    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
+
+    int result = 0;
+    int rc;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        const char *synopsis = (const char *)sqlite3_column_text(stmt, 0);
+        if (!synopsis)
+            continue;
+        /* Must be variadic AND have a format-like parameter name. */
+        if (strstr(synopsis, "...") != NULL &&
+            (strstr(synopsis, "format") != NULL ||
+             strstr(synopsis, "fmt")    != NULL)) {
+            result = 1;
+            break;
+        }
+    }
+
+    if (rc != SQLITE_ROW && rc != SQLITE_DONE) {
+        fprintf(stderr, "specdb: has_format step: %s\n", sqlite3_errmsg(db));
+        sqlite3_finalize(stmt);
+        return -1;
+    }
+
+    sqlite3_finalize(stmt);
+    return result;
+}
+
 int specdb_lookup_function(sqlite3 *db,
                            const char *name,
                            const char *section,

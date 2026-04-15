@@ -20,6 +20,11 @@ typedef struct {
     char *src_min;      /* minimal preprocessed */
     char *src_pp;       /* full clang -E (all headers) */
     char *src_pp_user;  /* preprocessed, only original file lines */
+
+    /* Line map: pp_user_line_map[i] = original source line for pp_user line i.
+     * Built by mc_preprocess_pp_trim_user().  NULL if pp_user is unavailable. */
+    unsigned *pp_user_line_map;
+    size_t    pp_user_line_count;
 } mc_source_views;
 
 typedef struct {

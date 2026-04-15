@@ -1,0 +1,5 @@
+tests/env_usage.c:15:5: ignored return of setenv(): unchecked return value of setenv()
+tests/env_usage.c:5:21: insecure_env_usage: environment variable 'PATH' accessed via getenv()
+tests/env_usage.c:10:21: insecure_env_usage: environment accessed via getenv()
+tests/env_usage.c:15:5: insecure_env_usage: environment variable 'LD_PRELOAD' accessed via setenv()
+tests/env_usage.c:16:5: insecure_env_usage: environment accessed via clearenv()

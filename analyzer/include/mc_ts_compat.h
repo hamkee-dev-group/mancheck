@@ -3,7 +3,14 @@
 
 /* This header is force-included for analyzer build, before any vendor headers.
  * It provides missing endian macros used by Tree-sitter on some platforms.
+ *
+ * Because this is force-included (-include), it runs before any source file's
+ * own feature-test macros.  Define them here so that popen/pclose/etc. are
+ * visible even under -std=c11.
  */
+#ifndef _XOPEN_SOURCE
+#  define _XOPEN_SOURCE 700
+#endif
 
 #if defined(__linux__)
 #  include <endian.h>

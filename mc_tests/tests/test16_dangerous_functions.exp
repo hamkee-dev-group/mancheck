@@ -1,0 +1,7 @@
+tests/test16_dangerous_functions.c:6:5: warning: use of dangerous function gets()
+tests/test16_dangerous_functions.c:7:5: warning: use of dangerous function strcpy()
+tests/test16_dangerous_functions.c:8:5: warning: use of dangerous function strcat()
+tests/test16_dangerous_functions.c:9:5: warning: use of dangerous function strncpy()
+tests/test16_dangerous_functions.c:10:5: warning: use of dangerous function strncat()
+tests/test16_dangerous_functions.c:11:5: warning: use of dangerous function sprintf()
+tests/test16_dangerous_functions.c:12:5: warning: use of dangerous function strtok()

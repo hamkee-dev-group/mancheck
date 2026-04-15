@@ -1,0 +1,4 @@
+tests/double_close.c:9:5: ignored return of close(): unchecked return value of close()
+tests/double_close.c:10:5: ignored return of close(): unchecked return value of close()
+tests/double_close.c:10:5: double_close: second call to close(fd); first at line 9
+tests/double_close.c:13:5: double_close: second call to free(p); first at line 12

@@ -23,10 +23,10 @@ typedef struct {
 } mc_func_rule;
 
 /* Look up rules for a function name.
- * Returns NULL if the function is not interesting (yet).
+ * Returns NULL if the function is not interesting.
  *
- * Today: implemented via a static compiled-in table.
- * Future: implemented via SQLite/specdb, config, etc.
+ * First checks the compiled-in static table, then falls back to specdb
+ * (if loaded via mc_rules_init_specdb) for RETVAL_MUST_CHECK inference.
  */
 const mc_func_rule *mc_rules_lookup(const char *name);
 
@@ -34,5 +34,13 @@ const mc_func_rule *mc_rules_lookup(const char *name);
  * e.g. "dangerous_function", "format_string", "return_value_check", "other"
  */
 const char *mc_rules_category(unsigned flags);
+
+/* Open specdb for use as a fallback rule source.
+ * path may be NULL to skip.  Returns 0 on success, -1 on error.
+ */
+int mc_rules_init_specdb(const char *path);
+
+/* Close any open specdb handle.  Safe to call even if never opened. */
+void mc_rules_close_specdb(void);
 
 #endif /* MC_RULES_H */

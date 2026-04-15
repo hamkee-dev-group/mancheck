@@ -1,0 +1,4 @@
+tests/test27_mixed_categories.c:11:5: warning: use of dangerous function gets()
+tests/test27_mixed_categories.c:14:5: ignored return of read(): unchecked return value of read()
+tests/test27_mixed_categories.c:17:5: warning: non-literal format string in printf()
+tests/test27_mixed_categories.c:20:5: warning: use of dangerous function sprintf()

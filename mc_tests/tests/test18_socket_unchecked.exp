@@ -1,0 +1,8 @@
+tests/test18_socket_unchecked.c:10:5: ignored return of socket(): unchecked return value of socket()
+tests/test18_socket_unchecked.c:11:5: ignored return of bind(): unchecked return value of bind()
+tests/test18_socket_unchecked.c:13:5: ignored return of listen(): unchecked return value of listen()
+tests/test18_socket_unchecked.c:14:5: ignored return of accept(): unchecked return value of accept()
+tests/test18_socket_unchecked.c:15:5: ignored return of connect(): unchecked return value of connect()
+tests/test18_socket_unchecked.c:17:5: ignored return of send(): unchecked return value of send()
+tests/test18_socket_unchecked.c:18:5: ignored return of recv(): unchecked return value of recv()
+tests/test18_socket_unchecked.c:19:5: ignored return of shutdown(): unchecked return value of shutdown()

@@ -1,0 +1,2 @@
+tests/test33_env_checked.c:5:21: insecure_env_usage: environment variable 'HOME' accessed via getenv()
+tests/test33_env_checked.c:8:9: insecure_env_usage: environment variable 'MY_VAR' accessed via setenv()

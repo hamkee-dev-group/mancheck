@@ -45,6 +45,37 @@ void specdb_free_function(struct specdb_func *f);
 /* Ensure schema on an already-open DB. Returns 0 on success. */
 int specdb_ensure_schema(sqlite3 *db);
 
+/*
+ * Check whether a function (by name, any section) has a "RETURN VALUE"
+ * section in its manpage.  Tries sections 2, 3, then any other.
+ *
+ * Returns:  1  = yes, has RETURN VALUE
+ *           0  = found but no RETURN VALUE section (or not found at all)
+ *          -1  = database error
+ */
+int specdb_function_has_retval(sqlite3 *db, const char *name);
+
+/*
+ * Check whether a function's manpage describes it as deprecated/unsafe.
+ * Searches DESCRIPTION, NOTES, BUGS, CAVEATS, WARNINGS sections for
+ * keywords like "deprecated", "obsolete", "should not be used", etc.
+ *
+ * Returns:  1 = yes, dangerous/deprecated
+ *           0 = not found or no such keywords
+ *          -1 = database error
+ */
+int specdb_function_is_dangerous(sqlite3 *db, const char *name);
+
+/*
+ * Check whether a function's prototype looks like a printf/scanf-family
+ * format-string function (variadic with a format/fmt parameter).
+ *
+ * Returns:  1 = yes, likely format-string function
+ *           0 = not found or no format pattern
+ *          -1 = database error
+ */
+int specdb_function_has_format_string(sqlite3 *db, const char *name);
+
 #ifdef __cplusplus
 }
 #endif

@@ -1,0 +1,14 @@
+# Build artifacts
+*.o
+*.a
+analyzer/analyzer
+specdb/specdb-build
+
+# Test output
+mc_tests/out/
+
+# Databases (generated, can be large)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm

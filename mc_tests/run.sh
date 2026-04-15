@@ -64,8 +64,19 @@ if [ ! -x "$ANALYZER_BIN" ]; then
     run_cmd make -C "${ROOT_DIR}/analyzer"
 fi
 
+SPECDB_BUILD="${ROOT_DIR}/specdb/specdb-build"
+
 if [ ! -f "$SPECDB_PATH" ]; then
-    log_fatal "specdb database not found at '${SPECDB_PATH}'"
+    log_info "specdb not found, building from manpages..."
+    if [ ! -x "$SPECDB_BUILD" ]; then
+        run_cmd make -C "${ROOT_DIR}/specdb"
+    fi
+    mkdir -p "$(dirname "$SPECDB_PATH")"
+    run_cmd "$SPECDB_BUILD" "$SPECDB_PATH" --scan-section 2
+    run_cmd "$SPECDB_BUILD" "$SPECDB_PATH" --scan-section 3
+    if [ ! -f "$SPECDB_PATH" ]; then
+        log_fatal "failed to build specdb at '${SPECDB_PATH}'"
+    fi
 fi
 
 # ----------------------------------------------------------------------
@@ -229,6 +240,250 @@ test_golden_outputs() {
 }
 
 # ----------------------------------------------------------------------
+# Test 6: JSON output mode
+# ----------------------------------------------------------------------
+test_json_output() {
+    log_info "=== Test 6: JSON output mode ==="
+
+    local src="${ROOT_DIR}/mc_tests/tests/test29_json_output.c"
+    local out
+    out="$("$ANALYZER_BIN" --json --no-db "$src" 2>/dev/null)"
+
+    # Must be valid JSON (starts with { and ends with })
+    local first last
+    first="$(echo "$out" | head -c1)"
+    last="$(echo "$out" | tail -c2 | head -c1)"
+
+    if [ "$first" = "{" ] && [ "$last" = "}" ]; then
+        log_pass "JSON output starts with { and ends with }"
+        passed=$((passed+1))
+    else
+        log_fail "JSON output not well-formed (first='$first', last='$last')"
+        failed=$((failed+1))
+    fi
+
+    # Must contain "files" array
+    if echo "$out" | grep -q '"files"'; then
+        log_pass "JSON output contains files array"
+        passed=$((passed+1))
+    else
+        log_fail "JSON output missing files array"
+        failed=$((failed+1))
+    fi
+
+    # Must mention read and malloc
+    if echo "$out" | grep -q '"read"' && echo "$out" | grep -q '"malloc"'; then
+        log_pass "JSON output contains expected function names"
+        passed=$((passed+1))
+    else
+        log_fail "JSON output missing expected function names"
+        failed=$((failed+1))
+    fi
+
+    # Must contain status and category fields
+    if echo "$out" | grep -q '"status"' && echo "$out" | grep -q '"category"'; then
+        log_pass "JSON output contains status and category fields"
+        passed=$((passed+1))
+    else
+        log_fail "JSON output missing status/category fields"
+        failed=$((failed+1))
+    fi
+}
+
+# ----------------------------------------------------------------------
+# Test 7: specdb comprehensive coverage
+# ----------------------------------------------------------------------
+test_specdb_comprehensive() {
+    log_info "=== Test 7: specdb comprehensive coverage ==="
+
+    local total_functions
+    total_functions="$(sqlite3 "$SPECDB_PATH" "SELECT COUNT(*) FROM functions;")"
+    if [ "$total_functions" -ge 100 ]; then
+        log_pass "specdb has $total_functions functions (>= 100)"
+        passed=$((passed+1))
+    else
+        log_fail "specdb has only $total_functions functions (expected >= 100)"
+        failed=$((failed+1))
+    fi
+
+    # Check sections are populated
+    local total_sections
+    total_sections="$(sqlite3 "$SPECDB_PATH" "SELECT COUNT(*) FROM function_sections;")"
+    if [ "$total_sections" -ge 500 ]; then
+        log_pass "specdb has $total_sections sections (>= 500)"
+        passed=$((passed+1))
+    else
+        log_fail "specdb has only $total_sections sections (expected >= 500)"
+        failed=$((failed+1))
+    fi
+
+    # Check aliases are populated
+    local total_aliases
+    total_aliases="$(sqlite3 "$SPECDB_PATH" "SELECT COUNT(*) FROM function_aliases;")"
+    if [ "$total_aliases" -ge 100 ]; then
+        log_pass "specdb has $total_aliases aliases (>= 100)"
+        passed=$((passed+1))
+    else
+        log_fail "specdb has only $total_aliases aliases (expected >= 100)"
+        failed=$((failed+1))
+    fi
+
+    # Check man sections 2 and 3 both present
+    local sec2 sec3
+    sec2="$(sqlite3 "$SPECDB_PATH" "SELECT COUNT(*) FROM functions WHERE section='2';")"
+    sec3="$(sqlite3 "$SPECDB_PATH" "SELECT COUNT(*) FROM functions WHERE section='3';")"
+
+    if [ "$sec2" -ge 50 ]; then
+        log_pass "specdb: section 2 has $sec2 entries (>= 50)"
+        passed=$((passed+1))
+    else
+        log_fail "specdb: section 2 has only $sec2 entries (expected >= 50)"
+        failed=$((failed+1))
+    fi
+
+    if [ "$sec3" -ge 100 ]; then
+        log_pass "specdb: section 3 has $sec3 entries (>= 100)"
+        passed=$((passed+1))
+    else
+        log_fail "specdb: section 3 has only $sec3 entries (expected >= 100)"
+        failed=$((failed+1))
+    fi
+
+    # Spot-check key functions have RETURN VALUE sections
+    local rv_read rv_malloc rv_fopen
+    rv_read="$(sqlite3 "$SPECDB_PATH" \
+        "SELECT COUNT(*) FROM functions f JOIN function_sections fs ON f.id=fs.function_id WHERE f.name='read' AND f.section='2' AND fs.section_name='RETURN VALUE';")"
+    rv_malloc="$(sqlite3 "$SPECDB_PATH" \
+        "SELECT COUNT(*) FROM functions f JOIN function_sections fs ON f.id=fs.function_id WHERE f.name='malloc' AND f.section='3' AND fs.section_name='RETURN VALUE';")"
+    rv_fopen="$(sqlite3 "$SPECDB_PATH" \
+        "SELECT COUNT(*) FROM functions f JOIN function_sections fs ON f.id=fs.function_id WHERE f.name='fopen' AND f.section='3' AND fs.section_name='RETURN VALUE';")"
+
+    [ "$rv_read"   -ge 1 ] && { log_pass "specdb: read(2) has RETURN VALUE section"; passed=$((passed+1)); } \
+                            || { log_fail "specdb: read(2) missing RETURN VALUE section"; failed=$((failed+1)); }
+    [ "$rv_malloc"  -ge 1 ] && { log_pass "specdb: malloc(3) has RETURN VALUE section"; passed=$((passed+1)); } \
+                             || { log_fail "specdb: malloc(3) missing RETURN VALUE section"; failed=$((failed+1)); }
+    [ "$rv_fopen"   -ge 1 ] && { log_pass "specdb: fopen(3) has RETURN VALUE section"; passed=$((passed+1)); } \
+                             || { log_fail "specdb: fopen(3) missing RETURN VALUE section"; failed=$((failed+1)); }
+}
+
+# ----------------------------------------------------------------------
+# Test 8: DB run tracking with multiple files
+# ----------------------------------------------------------------------
+test_db_multi_file() {
+    log_info "=== Test 8: DB run tracking with multiple files ==="
+
+    local db="${OUT_DIR}/multi_run.db"
+    rm -f "$db"
+
+    local src1="${ROOT_DIR}/mc_tests/tests/test01_simple_unchecked.c"
+    local src2="${ROOT_DIR}/mc_tests/tests/test30_clean_file.c"
+    local src3="${ROOT_DIR}/mc_tests/tests/test05_malloc_unchecked.c"
+
+    run_cmd "$ANALYZER_BIN" --db "$db" "$src1" "$src2" "$src3"
+
+    local run_count
+    run_count="$(sqlite3 "$db" "SELECT COUNT(*) FROM runs;")"
+    expect_eq "$run_count" "3" "three runs recorded for three files"
+
+    # Check that error_count varies per file
+    local err1 err2 err3
+    err1="$(sqlite3 "$db" "SELECT error_count FROM runs WHERE filename LIKE '%test01_%';")"
+    err2="$(sqlite3 "$db" "SELECT error_count FROM runs WHERE filename LIKE '%test30_%';")"
+    err3="$(sqlite3 "$db" "SELECT error_count FROM runs WHERE filename LIKE '%test05_%';")"
+
+    expect_eq "$err1" "2" "test01 has 2 errors"
+    expect_eq "$err2" "0" "test30 has 0 errors"
+    expect_eq "$err3" "1" "test05 has 1 error"
+}
+
+# ----------------------------------------------------------------------
+# Test 9: no-db mode produces no database file
+# ----------------------------------------------------------------------
+test_no_db_mode() {
+    log_info "=== Test 9: --no-db mode ==="
+
+    local db="${OUT_DIR}/should_not_exist.db"
+    rm -f "$db"
+
+    local src="${ROOT_DIR}/mc_tests/tests/test01_simple_unchecked.c"
+    "$ANALYZER_BIN" --no-db "$src" >/dev/null 2>&1
+
+    if [ ! -f "$db" ]; then
+        log_pass "--no-db does not create a database"
+        passed=$((passed+1))
+    else
+        log_fail "--no-db created a database"
+        failed=$((failed+1))
+    fi
+}
+
+# ----------------------------------------------------------------------
+# Test 10: FTS search in run database
+# ----------------------------------------------------------------------
+test_db_fts_search() {
+    log_info "=== Test 10: DB FTS search ==="
+
+    local db="${OUT_DIR}/fts_test.db"
+    rm -f "$db"
+
+    local src="${ROOT_DIR}/mc_tests/tests/test01_simple_unchecked.c"
+    "$ANALYZER_BIN" --db "$db" "$src" >/dev/null 2>&1
+
+    # Search for "read" in facts_fts
+    local fts_hits
+    fts_hits="$(sqlite3 "$db" "SELECT COUNT(*) FROM facts_fts WHERE facts_fts MATCH 'read';")"
+
+    if [ "$fts_hits" -ge 1 ]; then
+        log_pass "FTS search for 'read' returns $fts_hits hit(s)"
+        passed=$((passed+1))
+    else
+        log_fail "FTS search for 'read' returned 0 hits"
+        failed=$((failed+1))
+    fi
+}
+
+# ----------------------------------------------------------------------
+# Test 11: specdb integration – analyzer with --specdb flag
+# ----------------------------------------------------------------------
+test_specdb_integration() {
+    log_info "=== Test 11: specdb integration (--specdb flag) ==="
+
+    # mmap is NOT in the static rules table but IS in specdb
+    local src="${ROOT_DIR}/mc_tests/tests/test32_mmap_unchecked.c"
+
+    # Without specdb: only ftruncate + lseek should be flagged (2 issues)
+    local out_no_specdb
+    out_no_specdb="$("$ANALYZER_BIN" --no-db "$src" 2>&1 || true)"
+    local count_no_specdb
+    count_no_specdb="$(echo "$out_no_specdb" | grep -c 'ignored return' || true)"
+    expect_eq "$count_no_specdb" "2" "without specdb: 2 issues (ftruncate + lseek)"
+
+    # With specdb: mmap + munmap should also be flagged (4 total)
+    local out_with_specdb
+    out_with_specdb="$("$ANALYZER_BIN" --no-db --specdb "$SPECDB_PATH" "$src" 2>&1 || true)"
+    local count_with_specdb
+    count_with_specdb="$(echo "$out_with_specdb" | grep -c 'ignored return' || true)"
+    expect_eq "$count_with_specdb" "4" "with specdb: 4 issues (mmap + munmap + ftruncate + lseek)"
+
+    # Verify mmap specifically appears
+    if echo "$out_with_specdb" | grep -q 'mmap()'; then
+        log_pass "specdb: mmap() flagged by specdb lookup"
+        passed=$((passed+1))
+    else
+        log_fail "specdb: mmap() NOT flagged despite specdb"
+        failed=$((failed+1))
+    fi
+
+    # Verify a function NOT in specdb is still ignored
+    local clean_src="${ROOT_DIR}/mc_tests/tests/test30_clean_file.c"
+    local out_clean
+    out_clean="$("$ANALYZER_BIN" --no-db --specdb "$SPECDB_PATH" "$clean_src" 2>&1 || true)"
+    local count_clean
+    count_clean="$(echo "$out_clean" | grep -c 'ignored return' || true)"
+    expect_eq "$count_clean" "0" "specdb: clean file still produces 0 issues"
+}
+
+# ----------------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------------
 main() {
@@ -237,6 +492,12 @@ main() {
     test_specdb_core_functions
     test_analyzer_dump_views
     test_golden_outputs
+    test_json_output
+    test_specdb_comprehensive
+    test_db_multi_file
+    test_no_db_mode
+    test_db_fts_search
+    test_specdb_integration
 
     echo
     if [ "$failed" -eq 0 ]; then

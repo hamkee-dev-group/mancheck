@@ -1,7 +1,6 @@
 #ifndef MANCHECK_REPORT_H
 #define MANCHECK_REPORT_H
 
-#include "mancheck.h"
 #include "mc_db_integration.h"
 
 /* Set the current DB context + run for subsequent reports. */
@@ -17,7 +16,6 @@ void mc_report_issue(const char *file,
                      unsigned column,
                      const char *func_name,
                      const char *msg,
-                     struct mc_stats *stats,
                      int quiet);
 
 /*
@@ -34,7 +32,6 @@ void mc_report_fact_kind(const char *file,
                          const char *symbol,
                          const char *kind,
                          const char *msg,
-                         struct mc_stats *stats,
                          int quiet);
 
 /* Generic warning reporter (dangerous function, format string, etc.). */
@@ -43,9 +40,6 @@ void mc_report_warning(const char *file,
                        unsigned column,
                        const char *func_name,  /* may be NULL */
                        const char *msg,        /* full message text */
-                       struct mc_stats *stats, /* may be NULL */
                        int quiet);
-
-void mc_report_summary(const struct mc_stats *stats);
 
 #endif

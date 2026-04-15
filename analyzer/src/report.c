@@ -40,7 +40,6 @@ void mc_report_fact_kind(const char *file,
                          const char *symbol,
                          const char *kind,
                          const char *msg,
-                         struct mc_stats *stats,
                          int quiet)
 {
     if (!quiet) {
@@ -49,9 +48,6 @@ void mc_report_fact_kind(const char *file,
                line,
                column,
                msg ? msg : "");
-    }
-    if (stats) {
-        stats->issues_found++;
     }
     g_run_issues++;
 
@@ -81,7 +77,6 @@ void mc_report_issue(const char *file,
                      unsigned column,
                      const char *func_name,
                      const char *msg,
-                     struct mc_stats *stats,
                      int quiet)
 {
     if (!quiet) {
@@ -91,9 +86,6 @@ void mc_report_issue(const char *file,
                column,
                func_name ? func_name : "<func>",
                msg ? msg : "");
-    }
-    if (stats) {
-        stats->issues_found++;
     }
     g_run_issues++;
 
@@ -124,23 +116,13 @@ void mc_report_warning(const char *file,
                        unsigned column,
                        const char *func_name,
                        const char *msg,
-                       struct mc_stats *stats,
                        int quiet)
 {
-    /* For now, keep legacy behavior: DB kind "warning", symbol = func_name. */
     mc_report_fact_kind(file,
                         line,
                         column,
                         func_name ? func_name : "",
                         "warning",
                         msg,
-                        stats,
                         quiet);
-}
-
-void mc_report_summary(const struct mc_stats *stats)
-{
-    printf("mancheck: scanned %llu file(s), found %llu issue(s)\n",
-           (unsigned long long)stats->files_scanned,
-           (unsigned long long)stats->issues_found);
 }

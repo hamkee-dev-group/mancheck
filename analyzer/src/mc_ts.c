@@ -1,3 +1,4 @@
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -72,6 +73,52 @@ static char *read_file(const char *path, size_t *out_len) {
 }
 
 /* --- file lifecycle ------------------------------------------------- */
+
+static bool mc_ts_file_init_source(mc_ts_file *f, const char *path,
+                                   char *source, size_t source_len,
+                                   const unsigned *line_map,
+                                   size_t line_map_count) {
+    memset(f, 0, sizeof(*f));
+    f->path = path;
+    f->source = source;
+    f->source_len = source_len;
+    f->line_map = line_map;
+    f->line_map_count = line_map_count;
+
+    f->parser = ts_parser_new();
+    if (!f->parser) {
+        fprintf(stderr, "mc_ts: ts_parser_new failed\n");
+        f->source = NULL;  /* caller owns the buffer */
+        return false;
+    }
+
+    const TSLanguage *lang = tree_sitter_c();
+    if (!ts_parser_set_language(f->parser, lang)) {
+        fprintf(stderr, "mc_ts: ts_parser_set_language failed\n");
+        ts_parser_delete(f->parser);
+        f->parser = NULL;
+        f->source = NULL;
+        return false;
+    }
+
+    f->tree = ts_parser_parse_string(
+        f->parser,
+        NULL,
+        f->source,
+        (uint32_t)f->source_len
+    );
+
+    if (!f->tree) {
+        fprintf(stderr, "mc_ts: ts_parser_parse_string failed\n");
+        ts_parser_delete(f->parser);
+        f->parser = NULL;
+        f->source = NULL;
+        return false;
+    }
+
+    f->root = ts_tree_root_node(f->tree);
+    return true;
+}
 
 bool mc_ts_file_init(mc_ts_file *f, const char *path) {
     memset(f, 0, sizeof(*f));
@@ -154,6 +201,7 @@ static const char *mc_call_status_str(mc_call_status s) {
     case MC_CALL_STATUS_UNCHECKED:        return "unchecked";
     case MC_CALL_STATUS_CHECKED_COND:     return "checked_cond";
     case MC_CALL_STATUS_STORED:           return "stored";
+    case MC_CALL_STATUS_STORED_UNCHECKED: return "stored_unchecked";
     case MC_CALL_STATUS_PROPAGATED:       return "propagated";
     case MC_CALL_STATUS_IGNORED_EXPLICIT: return "ignored_explicit";
     default:                              return "unknown";
@@ -162,7 +210,9 @@ static const char *mc_call_status_str(mc_call_status s) {
 
 /* --- usage classification ------------------------------------------- */
 
-/* Is this call effectively part of the condition of if/while/do/for? */
+/* Is this call effectively part of the condition of if/while/do/for?
+ * We check that the node is in the "condition" field of the control
+ * statement, not just anywhere inside its body. */
 static bool is_in_condition_context(TSNode node) {
     TSNode cur = node;
     while (!ts_node_is_null(cur)) {
@@ -176,7 +226,16 @@ static bool is_in_condition_context(TSNode node) {
             strcmp(ptype, "while_statement") == 0 ||
             strcmp(ptype, "do_statement") == 0 ||
             strcmp(ptype, "for_statement") == 0) {
-            return true;
+            /* Check that cur is the "condition" child, not the body */
+            TSNode cond = ts_node_child_by_field_name(
+                parent, "condition", (uint32_t)strlen("condition"));
+            if (!ts_node_is_null(cond) &&
+                ts_node_start_byte(cur) >= ts_node_start_byte(cond) &&
+                ts_node_end_byte(cur) <= ts_node_end_byte(cond)) {
+                return true;
+            }
+            /* cur is in the body, not the condition -- keep walking
+             * up in case this is nested inside an outer condition. */
         }
 
         cur = parent;
@@ -245,11 +304,15 @@ static mc_call_status classify_call_usage(TSNode call_node,
     const char *etype = ts_node_type(expr);
     const char *ptype = ts_node_type(parent);
 
+    /* Result assigned or used to initialize a variable */
     if (strcmp(etype, "assignment_expression") == 0 ||
-        strcmp(etype, "init_declarator") == 0) {
+        strcmp(etype, "init_declarator") == 0 ||
+        strcmp(ptype, "assignment_expression") == 0 ||
+        strcmp(ptype, "init_declarator") == 0) {
         return MC_CALL_STATUS_STORED;
     }
 
+    /* Bare expression statement: result discarded */
     if (strcmp(ptype, "expression_statement") == 0) {
         if (is_void_cast(expr, source, source_len)) {
             return MC_CALL_STATUS_IGNORED_EXPLICIT;
@@ -257,19 +320,26 @@ static mc_call_status classify_call_usage(TSNode call_node,
         return MC_CALL_STATUS_UNCHECKED;
     }
 
+    /* Used in a condition (if/while/for/do) */
     if (is_in_condition_context(expr)) {
         return MC_CALL_STATUS_CHECKED_COND;
     }
 
+    /* Returned to caller */
     if (strcmp(ptype, "return_statement") == 0) {
         return MC_CALL_STATUS_PROPAGATED;
     }
 
-    if (strcmp(ptype, "assignment_expression") == 0 ||
-        strcmp(ptype, "init_declarator") == 0) {
+    /* Used as an argument to another call, comma expression, etc.
+     * The value is consumed by something, so treat as stored. */
+    if (strcmp(ptype, "argument_list") == 0 ||
+        strcmp(ptype, "comma_expression") == 0 ||
+        strcmp(ptype, "conditional_expression") == 0) {
         return MC_CALL_STATUS_STORED;
     }
 
+    /* Anything else we don't recognize: conservatively assume stored
+     * so we don't false-positive on uncommon AST shapes. */
     return MC_CALL_STATUS_STORED;
 }
 
@@ -340,7 +410,28 @@ static bool is_nonliteral_format_call(const mc_ts_file *file,
             return false;
         fmt_index = 1;
     } else {
-        return false;
+        /*
+         * Unknown format-string function (discovered via specdb).
+         * Heuristic: the format parameter is typically the last named
+         * parameter before the variadic args.  For functions with 1 arg
+         * it's index 0, for 2 args it's index 1, etc.  But we can't
+         * easily distinguish the variadic args in the tree-sitter AST.
+         * Fall back: scan all string-literal arguments; if none of them
+         * are string literals, the format is likely non-literal.
+         * Simpler: check each argument from 0..n-1 and report if any
+         * const char* position is non-literal.
+         *
+         * Simplest practical heuristic: for a function with N args where
+         * N >= 2, the format is likely at index N-2 (penultimate arg
+         * before the variadic expansion). For N == 1, it's index 0.
+         * For N == 0, bail.
+         */
+        if (named_count == 0)
+            return false;
+        if (named_count == 1)
+            fmt_index = 0;
+        else
+            fmt_index = 1;  /* most format-string functions: fmt is 2nd arg */
     }
 
     if (fmt_index >= named_count)
@@ -356,6 +447,176 @@ static bool is_nonliteral_format_call(const mc_ts_file *file,
     }
 
     return true;
+}
+
+/* forward-declare (defined below, after text_warning_sink) */
+static void mc_ts_node_text_copy(const mc_ts_file *f,
+                                 TSNode node,
+                                 char *buf,
+                                 size_t bufsize);
+
+/* --- stored-but-not-checked analysis -------------------------------- */
+
+/* Check if text [text, text+text_len) contains `name` as a whole-word identifier. */
+static bool
+text_contains_ident(const char *text, size_t text_len,
+                    const char *name, size_t name_len)
+{
+    if (name_len == 0 || name_len > text_len)
+        return false;
+
+    for (size_t i = 0; i + name_len <= text_len; i++) {
+        if (memcmp(text + i, name, name_len) != 0)
+            continue;
+        /* word-boundary check */
+        bool left_ok  = (i == 0) ||
+                        !(isalnum((unsigned char)text[i - 1]) || text[i - 1] == '_');
+        bool right_ok = (i + name_len >= text_len) ||
+                        !(isalnum((unsigned char)text[i + name_len]) ||
+                          text[i + name_len] == '_');
+        if (left_ok && right_ok)
+            return true;
+    }
+    return false;
+}
+
+/* Walk up from `node` until we find a direct child of a compound_statement. */
+static TSNode
+find_enclosing_block_stmt(TSNode node)
+{
+    TSNode child  = node;
+    TSNode parent = ts_node_parent(node);
+    while (!ts_node_is_null(parent)) {
+        if (strcmp(ts_node_type(parent), "compound_statement") == 0)
+            return child;
+        child  = parent;
+        parent = ts_node_parent(parent);
+    }
+    return mc_ts_null_node();
+}
+
+/* Extract the variable name when a call's return value is stored via
+ * init_declarator (int fd = open(..)) or assignment_expression (fd = open(..)). */
+static bool
+extract_store_varname(const mc_ts_file *f, TSNode call_node,
+                      char *buf, size_t bufsize)
+{
+    TSNode expr   = ascend_expression(call_node);
+    TSNode parent = ts_node_parent(expr);
+    if (ts_node_is_null(parent))
+        return false;
+
+    const char *etype = ts_node_type(expr);
+    const char *ptype = ts_node_type(parent);
+
+    TSNode var_node = mc_ts_null_node();
+
+    /* Case 1: init_declarator  →  int fd = open(...) */
+    if (strcmp(etype, "init_declarator") == 0 ||
+        strcmp(ptype, "init_declarator") == 0) {
+        TSNode init = (strcmp(etype, "init_declarator") == 0) ? expr : parent;
+        var_node = ts_node_child_by_field_name(
+            init, "declarator", (uint32_t)strlen("declarator"));
+        /* Drill through pointer_declarator: int *p = malloc(...) */
+        while (!ts_node_is_null(var_node) &&
+               strcmp(ts_node_type(var_node), "pointer_declarator") == 0) {
+            TSNode inner = mc_ts_null_node();
+            uint32_t nc = ts_node_named_child_count(var_node);
+            for (uint32_t i = 0; i < nc; i++) {
+                TSNode ch = ts_node_named_child(var_node, i);
+                if (strcmp(ts_node_type(ch), "identifier") == 0) {
+                    inner = ch;
+                    break;
+                }
+            }
+            var_node = inner;
+        }
+    }
+    /* Case 2: assignment_expression  →  fd = open(...) */
+    else if (strcmp(etype, "assignment_expression") == 0 ||
+             strcmp(ptype, "assignment_expression") == 0) {
+        TSNode assign = (strcmp(etype, "assignment_expression") == 0) ? expr : parent;
+        var_node = ts_node_child_by_field_name(
+            assign, "left", (uint32_t)strlen("left"));
+    }
+
+    if (ts_node_is_null(var_node))
+        return false;
+    if (strcmp(ts_node_type(var_node), "identifier") != 0)
+        return false;
+
+    mc_ts_node_text_copy(f, var_node, buf, bufsize);
+    return buf[0] != '\0';
+}
+
+/* Check if a subtree's source text contains the given identifier. */
+static bool
+subtree_has_ident(const mc_ts_file *f, TSNode node,
+                  const char *name, size_t name_len)
+{
+    uint32_t sb = ts_node_start_byte(node);
+    uint32_t eb = ts_node_end_byte(node);
+    if (eb > f->source_len) eb = (uint32_t)f->source_len;
+    if (sb >= eb) return false;
+    return text_contains_ident(f->source + sb, eb - sb, name, name_len);
+}
+
+/* Scan siblings after `store_stmt` in the enclosing compound_statement.
+ * Return true if `varname` is used in a condition, return, or (void) cast. */
+static bool
+is_var_checked_in_block(const mc_ts_file *f, TSNode store_stmt,
+                        const char *varname)
+{
+    size_t vlen = strlen(varname);
+    TSNode parent = ts_node_parent(store_stmt);
+    if (ts_node_is_null(parent))
+        return false;
+
+    uint32_t n = ts_node_named_child_count(parent);
+    bool found_self = false;
+
+    for (uint32_t i = 0; i < n; i++) {
+        TSNode child = ts_node_named_child(parent, i);
+
+        if (!found_self) {
+            if (ts_node_start_byte(child) == ts_node_start_byte(store_stmt) &&
+                ts_node_end_byte(child) == ts_node_end_byte(store_stmt))
+                found_self = true;
+            continue;
+        }
+
+        const char *ntype = ts_node_type(child);
+
+        /* if / while / for / do / switch: check condition subtree */
+        if (strcmp(ntype, "if_statement") == 0 ||
+            strcmp(ntype, "while_statement") == 0 ||
+            strcmp(ntype, "for_statement") == 0 ||
+            strcmp(ntype, "do_statement") == 0 ||
+            strcmp(ntype, "switch_statement") == 0) {
+            TSNode cond = ts_node_child_by_field_name(
+                child, "condition", (uint32_t)strlen("condition"));
+            if (!ts_node_is_null(cond) && subtree_has_ident(f, cond, varname, vlen))
+                return true;
+        }
+
+        /* return var; */
+        if (strcmp(ntype, "return_statement") == 0) {
+            if (subtree_has_ident(f, child, varname, vlen))
+                return true;
+        }
+
+        /* (void)var; — explicit acknowledgment */
+        if (strcmp(ntype, "expression_statement") == 0) {
+            TSNode inner = ts_node_named_child(child, 0);
+            if (!ts_node_is_null(inner) &&
+                strcmp(ts_node_type(inner), "cast_expression") == 0) {
+                if (subtree_has_ident(f, inner, varname, vlen))
+                    return true;
+            }
+        }
+    }
+
+    return false;
 }
 
 /* --- generic call walker -------------------------------------------- */
@@ -434,11 +695,32 @@ static void analyze_calls(const mc_ts_file *f, mc_call_sink sink, void *userdata
                                                 f->source,
                                                 f->source_len);
 
+        /* Stored-but-not-checked: if the return value was stored in a
+         * variable but the variable is never used in a condition, return,
+         * or acknowledged via (void)var, reclassify as STORED_UNCHECKED. */
+        if (st == MC_CALL_STATUS_STORED &&
+            (rule->flags & MC_FUNC_RULE_RETVAL_MUST_CHECK)) {
+            char varname[64];
+            if (extract_store_varname(f, call_node, varname, sizeof varname)) {
+                TSNode block_stmt = find_enclosing_block_stmt(call_node);
+                if (!ts_node_is_null(block_stmt) &&
+                    !is_var_checked_in_block(f, block_stmt, varname)) {
+                    st = MC_CALL_STATUS_STORED_UNCHECKED;
+                }
+            }
+        }
+
         TSPoint pt = ts_node_start_point(call_node);
         mc_call_info info;
         info.func_name = func_name;
         info.status = st;
-        info.line = pt.row + 1;
+
+        /* Translate line via pp line map if available. */
+        if (f->line_map && pt.row < (uint32_t)f->line_map_count)
+            info.line = f->line_map[pt.row];
+        else
+            info.line = pt.row + 1;
+
         info.col  = pt.column + 1;
         info.flags = rule->flags;
         info.call_node = call_node;
@@ -469,7 +751,6 @@ static void text_warning_sink(const mc_ts_file *file,
                           info->col,
                           info->func_name,
                           msg,
-                          NULL,
                           0);
         return;
     }
@@ -484,7 +765,6 @@ static void text_warning_sink(const mc_ts_file *file,
                               info->col,
                               info->func_name,
                               msg,
-                              NULL,
                               0);
             return;
         }
@@ -502,8 +782,18 @@ static void text_warning_sink(const mc_ts_file *file,
                             info->col,
                             info->func_name,
                             msg,
-                            NULL,
                             0);
+        } else if (info->status == MC_CALL_STATUS_STORED_UNCHECKED) {
+            snprintf(msg, sizeof(msg),
+                     "stored but unchecked return value of %s()",
+                     info->func_name);
+
+            mc_report_warning(file->path,
+                              info->line,
+                              info->col,
+                              info->func_name,
+                              msg,
+                              0);
         }
     }
 }
@@ -535,9 +825,11 @@ static void mc_ts_node_text_copy(const mc_ts_file *f,
     buf[len] = '\0';
 }
 
-static uint32_t mc_ts_node_start_line(TSNode node)
+static uint32_t mc_ts_node_start_line(const mc_ts_file *f, TSNode node)
 {
     TSPoint p = ts_node_start_point(node);
+    if (f->line_map && p.row < (uint32_t)f->line_map_count)
+        return f->line_map[p.row];
     return p.row + 1;
 }
 
@@ -559,20 +851,6 @@ static void mc_ts_identifier_name(const mc_ts_file *f,
         return;
     }
     mc_ts_node_text_copy(f, node, buf, bufsize);
-}
-
-static TSNode mc_ts_first_argument(TSNode call)
-{
-    TSNode args = ts_node_child_by_field_name(call, "arguments",
-                                              (uint32_t)strlen("arguments"));
-    if (ts_node_is_null(args))
-        return mc_ts_null_node();
-
-    uint32_t named_count = ts_node_named_child_count(args);
-    if (named_count == 0)
-        return mc_ts_null_node();
-
-    return ts_node_named_child(args, 0);
 }
 
 static TSNode mc_ts_find_identifier(TSNode node)
@@ -681,7 +959,7 @@ static void mc_extra_check_env_call(const mc_ts_file *f,
                  "insecure_env_usage: environment accessed via %s()", name);
     }
 
-    uint32_t line = mc_ts_node_start_line(call);
+    uint32_t line = mc_ts_node_start_line(f, call);
     uint32_t col  = mc_ts_node_start_col(call);
 
     mc_report_warning(f->path,
@@ -689,7 +967,6 @@ static void mc_extra_check_env_call(const mc_ts_file *f,
                       col,
                       symbol,
                       msg,
-                      NULL,
                       0);
 }
 
@@ -754,7 +1031,7 @@ static void mc_extra_check_declaration_malloc_mismatch(const mc_ts_file *f,
         if (strstr(init_text, pat1) == NULL && strstr(init_text, pat2) == NULL)
             continue;
 
-        uint32_t line = mc_ts_node_start_line(value);
+        uint32_t line = mc_ts_node_start_line(f, value);
         uint32_t col  = mc_ts_node_start_col(value);
         char msg[256];
         snprintf(msg, sizeof msg,
@@ -766,7 +1043,6 @@ static void mc_extra_check_declaration_malloc_mismatch(const mc_ts_file *f,
                           col,
                           var_name,
                           msg,
-                          NULL,
                           0);
     }
 }
@@ -779,6 +1055,7 @@ typedef struct {
     uint32_t first_line;
     uint32_t first_col;
     int used;
+    int terminal;  /* 1 = close is on a path that exits (return/exit follows) */
 } mc_closed_entry;
 
 #define MC_MAX_CLOSED_VARS 128
@@ -790,6 +1067,90 @@ static bool mc_is_close_like_name(const char *name)
            strcmp(name, "pclose") == 0 ||
            strcmp(name, "free")   == 0 ||
            strcmp(name, "munmap") == 0;
+}
+
+/*
+ * Check whether a close() call is "terminal" — i.e., the containing block
+ * immediately returns or exits after the close.  Pattern:
+ *     close(fd); return ...;     // terminal
+ *     close(fd); exit(1);        // terminal
+ *     close(fd); _exit(1);       // terminal
+ *     close(fd); [more code]     // NOT terminal
+ *
+ * Walk up from the call to find the expression_statement, then check if the
+ * next sibling in the parent block is return/exit.
+ */
+static bool mc_is_exit_call(const mc_ts_file *f, TSNode stmt)
+{
+    /* Check if stmt is an expression_statement containing a call to exit/_exit. */
+    if (strcmp(ts_node_type(stmt), "expression_statement") != 0)
+        return false;
+
+    uint32_t nc = ts_node_named_child_count(stmt);
+    for (uint32_t j = 0; j < nc; j++) {
+        TSNode expr = ts_node_named_child(stmt, j);
+        if (strcmp(ts_node_type(expr), "call_expression") != 0)
+            continue;
+
+        TSNode fn = ts_node_child_by_field_name(
+            expr, "function", (uint32_t)strlen("function"));
+        if (ts_node_is_null(fn))
+            continue;
+        if (strcmp(ts_node_type(fn), "identifier") != 0)
+            continue;
+
+        char name[16];
+        mc_ts_node_text_copy(f, fn, name, sizeof name);
+        if (strcmp(name, "exit")  == 0 ||
+            strcmp(name, "_exit") == 0 ||
+            strcmp(name, "_Exit") == 0 ||
+            strcmp(name, "abort") == 0)
+            return true;
+    }
+    return false;
+}
+
+static bool mc_is_terminal_close(const mc_ts_file *f, TSNode call)
+{
+    /* Walk up to the expression_statement containing this call. */
+    TSNode stmt = call;
+    while (!ts_node_is_null(stmt)) {
+        if (strcmp(ts_node_type(stmt), "expression_statement") == 0)
+            break;
+        stmt = ts_node_parent(stmt);
+    }
+    if (ts_node_is_null(stmt))
+        return false;
+
+    TSNode parent = ts_node_parent(stmt);
+    if (ts_node_is_null(parent))
+        return false;
+
+    /*
+     * Check if any remaining sibling in this block is a return or exit.
+     * This handles patterns like:
+     *     free(buf); close(fd); return -1;
+     * where free's immediate next sibling is close(), but the block
+     * ends with return — so all statements in this block are terminal.
+     */
+    uint32_t n = ts_node_named_child_count(parent);
+    bool found_self = false;
+    for (uint32_t i = 0; i < n; i++) {
+        TSNode child = ts_node_named_child(parent, i);
+        if (!found_self) {
+            if (ts_node_start_byte(child) == ts_node_start_byte(stmt) &&
+                ts_node_end_byte(child)   == ts_node_end_byte(stmt))
+                found_self = true;
+            continue;
+        }
+        /* Check all subsequent siblings for return/exit. */
+        const char *ntype = ts_node_type(child);
+        if (strcmp(ntype, "return_statement") == 0)
+            return true;
+        if (mc_is_exit_call(f, child))
+            return true;
+    }
+    return false;
 }
 
 static void mc_extra_check_double_close_call(const mc_ts_file *f,
@@ -834,11 +1195,21 @@ static void mc_extra_check_double_close_call(const mc_ts_file *f,
     if (var[0] == '\0')
         return;
 
+    /* Is this close on a terminal path (followed by return/exit)? */
+    int this_is_terminal = mc_is_terminal_close(f, call) ? 1 : 0;
+
     for (size_t i = 0; i < table_len; i++) {
         if (!table[i].used)
             continue;
         if (strcmp(table[i].var, var) == 0) {
-            uint32_t line = mc_ts_node_start_line(call);
+            /*
+             * Skip if the first close was terminal — it's on a path
+             * that exits, so a later close on a different path is fine.
+             */
+            if (table[i].terminal)
+                continue;
+
+            uint32_t line = mc_ts_node_start_line(f, call);
             uint32_t col  = mc_ts_node_start_col(call);
             char msg[256];
             snprintf(msg, sizeof msg,
@@ -850,7 +1221,6 @@ static void mc_extra_check_double_close_call(const mc_ts_file *f,
                               col,
                               var,
                               msg,
-                              NULL,
                               0);
             return;
         }
@@ -859,7 +1229,8 @@ static void mc_extra_check_double_close_call(const mc_ts_file *f,
     for (size_t i = 0; i < table_len; i++) {
         if (!table[i].used) {
             table[i].used       = 1;
-            table[i].first_line = mc_ts_node_start_line(call);
+            table[i].terminal   = this_is_terminal;
+            table[i].first_line = mc_ts_node_start_line(f, call);
             table[i].first_col  = mc_ts_node_start_col(call);
             strncpy(table[i].var, var, sizeof table[i].var - 1);
             table[i].var[sizeof table[i].var - 1] = '\0';
@@ -936,6 +1307,29 @@ bool mc_ts_report_unchecked_calls(const char *path) {
 
 /* --- JSON report (for training / tooling) --------------------------- */
 
+static void
+mc_json_escape(FILE *out, const char *s)
+{
+    if (!s) { fputs("null", out); return; }
+    fputc('"', out);
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        switch (*p) {
+        case '\\': fputs("\\\\", out); break;
+        case '"':  fputs("\\\"", out); break;
+        case '\n': fputs("\\n",  out); break;
+        case '\r': fputs("\\r",  out); break;
+        case '\t': fputs("\\t",  out); break;
+        default:
+            if (*p < 0x20)
+                fprintf(out, "\\u%04x", *p);
+            else
+                fputc((int)*p, out);
+            break;
+        }
+    }
+    fputc('"', out);
+}
+
 typedef struct {
     bool first_call;
 } json_state;
@@ -955,12 +1349,12 @@ static void json_sink(const mc_ts_file *file,
 
     const char *category = mc_rules_category(info->flags);
 
-    printf("      {\"function\":\"%s\","
-           "\"status\":\"%s\","
+    printf("      {\"function\":");
+    mc_json_escape(stdout, info->func_name);
+    printf(",\"status\":\"%s\","
            "\"category\":\"%s\","
            "\"line\":%u,"
            "\"column\":%u}",
-           info->func_name,
            mc_call_status_str(info->status),
            category,
            info->line,
@@ -974,7 +1368,74 @@ bool mc_ts_report_file_json(const char *path) {
 
     json_state st = { .first_call = true };
 
-    printf("  {\"path\":\"%s\",\"calls\":[\n", path);
+    printf("  {\"path\":");
+    mc_json_escape(stdout, path);
+    printf(",\"calls\":[\n");
+    analyze_calls(&f, json_sink, &st);
+    printf("\n  ]}");
+
+    mc_ts_file_destroy(&f);
+    return true;
+}
+
+/* --- Extended versions using preprocessed source --------------------- */
+
+bool mc_ts_report_unchecked_calls_ex(const char *path,
+                                     const char *pp_source,
+                                     size_t pp_source_len,
+                                     const unsigned *line_map,
+                                     size_t line_map_count)
+{
+    if (!pp_source || pp_source_len == 0)
+        return mc_ts_report_unchecked_calls(path);
+
+    mc_ts_file f;
+    char *src_copy = malloc(pp_source_len + 1);
+    if (!src_copy)
+        return false;
+    memcpy(src_copy, pp_source, pp_source_len);
+    src_copy[pp_source_len] = '\0';
+
+    if (!mc_ts_file_init_source(&f, path, src_copy, pp_source_len,
+                                line_map, line_map_count)) {
+        free(src_copy);
+        return false;
+    }
+
+    analyze_calls(&f, text_warning_sink, NULL);
+    mc_run_extra_checks(&f);
+
+    mc_ts_file_destroy(&f);
+    return true;
+}
+
+bool mc_ts_report_file_json_ex(const char *path,
+                               const char *pp_source,
+                               size_t pp_source_len,
+                               const unsigned *line_map,
+                               size_t line_map_count)
+{
+    if (!pp_source || pp_source_len == 0)
+        return mc_ts_report_file_json(path);
+
+    mc_ts_file f;
+    char *src_copy = malloc(pp_source_len + 1);
+    if (!src_copy)
+        return false;
+    memcpy(src_copy, pp_source, pp_source_len);
+    src_copy[pp_source_len] = '\0';
+
+    if (!mc_ts_file_init_source(&f, path, src_copy, pp_source_len,
+                                line_map, line_map_count)) {
+        free(src_copy);
+        return false;
+    }
+
+    json_state st = { .first_call = true };
+
+    printf("  {\"path\":");
+    mc_json_escape(stdout, path);
+    printf(",\"calls\":[\n");
     analyze_calls(&f, json_sink, &st);
     printf("\n  ]}");
 

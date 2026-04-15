@@ -1,0 +1,2 @@
+tests/test29_json_output.c:7:5: ignored return of read(): unchecked return value of read()
+tests/test29_json_output.c:8:5: ignored return of malloc(): unchecked return value of malloc()
