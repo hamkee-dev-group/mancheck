@@ -9,8 +9,9 @@ void mc_report_set_gcc_mode(int enabled);
 /* Set the current DB context + run for subsequent reports. */
 void mc_report_set_db(mc_db_ctx *ctx, mc_db_run *run);
 
-/* Reset and query per-run issue counters (for runs.error_count). */
+/* Reset, increment, and query per-run issue counters (for runs.error_count). */
 void mc_report_reset_run_counters(void);
+void mc_report_count_issue(void);
 unsigned long long mc_report_get_run_issue_count(void);
 
 /* For "ignored return" / unchecked return issues. */

@@ -86,7 +86,7 @@ test_analyzer_unchecked_basic() {
     log_info "=== Test 1: analyzer basic unchecked-return (DB) ==="
 
     local src="${ROOT_DIR}/mc_tests/tests/test01_simple_unchecked.c"
-    run_cmd "$ANALYZER_BIN" --db "$TEST_DB" "$src"
+    run_cmd "$ANALYZER_BIN" --db "$TEST_DB" "$src" || true
 
     local runs
     runs="$(sqlite3 "$TEST_DB" "SELECT COUNT(*) FROM runs WHERE filename LIKE '%test01_simple_unchecked.c%';")"
@@ -167,7 +167,7 @@ test_analyzer_dump_views() {
     local src="${ROOT_DIR}/mc_tests/tests/test01_simple_unchecked.c"
     rm -f "$VIEWS_FILE"
 
-    run_cmd "$ANALYZER_BIN" --db "$TEST_DB" "$src" --dump-views "$VIEWS_FILE"
+    run_cmd "$ANALYZER_BIN" --db "$TEST_DB" "$src" --dump-views "$VIEWS_FILE" || true
 
     if [ ! -s "$VIEWS_FILE" ]; then
         log_fail "--dump-views produced empty file"
@@ -247,7 +247,7 @@ test_json_output() {
 
     local src="${ROOT_DIR}/mc_tests/tests/test29_json_output.c"
     local out
-    out="$("$ANALYZER_BIN" --json --no-db "$src" 2>/dev/null)"
+    out="$("$ANALYZER_BIN" --json --no-db "$src" 2>/dev/null)" || true
 
     # Must be valid JSON (starts with { and ends with })
     local first last
@@ -379,7 +379,7 @@ test_db_multi_file() {
     local src2="${ROOT_DIR}/mc_tests/tests/test30_clean_file.c"
     local src3="${ROOT_DIR}/mc_tests/tests/test05_malloc_unchecked.c"
 
-    run_cmd "$ANALYZER_BIN" --db "$db" "$src1" "$src2" "$src3"
+    run_cmd "$ANALYZER_BIN" --db "$db" "$src1" "$src2" "$src3" || true
 
     local run_count
     run_count="$(sqlite3 "$db" "SELECT COUNT(*) FROM runs;")"
@@ -406,7 +406,7 @@ test_no_db_mode() {
     rm -f "$db"
 
     local src="${ROOT_DIR}/mc_tests/tests/test01_simple_unchecked.c"
-    "$ANALYZER_BIN" --no-db "$src" >/dev/null 2>&1
+    "$ANALYZER_BIN" --no-db "$src" >/dev/null 2>&1 || true
 
     if [ ! -f "$db" ]; then
         log_pass "--no-db does not create a database"
@@ -427,7 +427,7 @@ test_db_fts_search() {
     rm -f "$db"
 
     local src="${ROOT_DIR}/mc_tests/tests/test01_simple_unchecked.c"
-    "$ANALYZER_BIN" --db "$db" "$src" >/dev/null 2>&1
+    "$ANALYZER_BIN" --db "$db" "$src" >/dev/null 2>&1 || true
 
     # Search for "read" in facts_fts
     local fts_hits
@@ -491,7 +491,7 @@ test_gcc_format_mixed() {
 
     local src="mc_tests/tests/test27_mixed_categories.c"
     local out
-    out="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --gcc --no-db "$src" 2>&1)"
+    out="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --gcc --no-db "$src" 2>&1)" || true
 
     local count
     count="$(echo "$out" | grep -c '^mc_tests/tests/test27_mixed_categories\.c:.*: warning:' || true)"
@@ -525,7 +525,7 @@ test_gcc_format_double_close() {
 
     local src="mc_tests/tests/double_close.c"
     local out
-    out="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --gcc --no-db "$src" 2>&1)"
+    out="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --gcc --no-db "$src" 2>&1)" || true
 
     if echo "$out" | grep -q 'warning: double_close: second call to close(fd); first at line 9'; then
         log_pass "gcc: double_close diagnostic in GCC-style format"
@@ -547,7 +547,7 @@ test_suppressions() {
 
     # Without suppressions: both warnings appear
     local out_nosup
-    out_nosup="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --no-db "$src" 2>&1)"
+    out_nosup="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --no-db "$src" 2>&1)" || true
 
     local count_nosup
     count_nosup="$(echo "$out_nosup" | grep -c ':' || true)"
@@ -555,7 +555,7 @@ test_suppressions() {
 
     # With suppressions: return_value_check suppressed, dangerous remains
     local out_sup
-    out_sup="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --no-db --suppressions "$sup" "$src" 2>&1)"
+    out_sup="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --no-db --suppressions "$sup" "$src" 2>&1)" || true
 
     local count_sup
     count_sup="$(echo "$out_sup" | grep -c ':' || true)"
@@ -581,7 +581,7 @@ test_suppressions() {
     local abs_src
     abs_src="$(cd "$ROOT_DIR" && realpath "$src")"
     local out_abs
-    out_abs="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --no-db --suppressions "$sup" "$abs_src" 2>&1)"
+    out_abs="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --no-db --suppressions "$sup" "$abs_src" 2>&1)" || true
 
     local count_abs
     count_abs="$(echo "$out_abs" | grep -c 'dangerous function gets()' || true)"
@@ -589,7 +589,7 @@ test_suppressions() {
 
     # Different file same category still reports
     local out_other
-    out_other="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --no-db --suppressions "$sup" mc_tests/tests/test01_simple_unchecked.c 2>&1)"
+    out_other="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --no-db --suppressions "$sup" mc_tests/tests/test01_simple_unchecked.c 2>&1)" || true
 
     local count_other
     count_other="$(echo "$out_other" | grep -c 'read()' || true)"
@@ -598,7 +598,7 @@ test_suppressions() {
     # DB error_count reflects suppression
     local sup_db="${ROOT_DIR}/mc_tests/suppress_test.db"
     rm -f "$sup_db"
-    (cd "$ROOT_DIR" && "$ANALYZER_BIN" --db "$sup_db" --suppressions "$sup" "$src" >/dev/null 2>&1)
+    (cd "$ROOT_DIR" && "$ANALYZER_BIN" --db "$sup_db" --suppressions "$sup" "$src" >/dev/null 2>&1) || true
 
     local db_count
     db_count="$(sqlite3 "$sup_db" "SELECT error_count FROM runs ORDER BY rowid DESC LIMIT 1;" 2>/dev/null || echo "")"
@@ -607,7 +607,7 @@ test_suppressions() {
 
     # JSON mode: suppressed diagnostic absent, unsuppressed present
     local out_json
-    out_json="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --json --no-db --suppressions "$sup" "$src" 2>/dev/null)"
+    out_json="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --json --no-db --suppressions "$sup" "$src" 2>/dev/null)" || true
 
     local json_read_count
     json_read_count="$(echo "$out_json" | grep -c '"read"' || true)"
@@ -619,7 +619,7 @@ test_suppressions() {
 
     # JSON mode: checked calls in suppressed category still appear
     local out_json_checked
-    out_json_checked="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --json --no-db --suppressions "$sup" mc_tests/tests/test28_binary_expr_check.c 2>/dev/null)"
+    out_json_checked="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --json --no-db --suppressions "$sup" mc_tests/tests/test28_binary_expr_check.c 2>/dev/null)" || true
 
     local json_checked
     json_checked="$(echo "$out_json_checked" | grep -c '"checked_cond"' || true)"
@@ -641,7 +641,7 @@ test_inline_suppress() {
     local src="mc_tests/tests/test36_inline_suppress.c"
 
     local out
-    out="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --no-db "$src" 2>&1)"
+    out="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --no-db "$src" 2>&1)" || true
 
     # 3 diagnostics: unsuppressed read (line 12), gets (line 14), read after string literal (line 18)
     local count
@@ -704,11 +704,43 @@ test_inline_suppress() {
 
     # JSON mode: inline suppression also works
     local out_json
-    out_json="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --json --no-db "$src" 2>/dev/null)"
+    out_json="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --json --no-db "$src" 2>/dev/null)" || true
 
     local json_gets_count
     json_gets_count="$(echo "$out_json" | grep -c '"gets"' || true)"
     expect_eq "$json_gets_count" "1" "inline suppress JSON: gets() still present"
+}
+
+# ----------------------------------------------------------------------
+# Test 16: Exit codes – non-zero on findings, zero when clean
+# ----------------------------------------------------------------------
+test_exit_codes() {
+    log_info "=== Test 16: Exit codes ==="
+
+    # Text mode: findings → exit 1
+    local rc=0
+    (cd "$ROOT_DIR" && "$ANALYZER_BIN" --no-db mc_tests/tests/test01_simple_unchecked.c >/dev/null 2>&1) || rc=$?
+    expect_eq "$rc" "1" "text mode: exit 1 when findings reported"
+
+    # Text mode: clean file → exit 0
+    rc=0
+    (cd "$ROOT_DIR" && "$ANALYZER_BIN" --no-db mc_tests/tests/test30_clean_file.c >/dev/null 2>&1) || rc=$?
+    expect_eq "$rc" "0" "text mode: exit 0 when no findings"
+
+    # JSON mode: findings → exit 1, valid JSON
+    rc=0
+    local json_out
+    json_out="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --json --no-db mc_tests/tests/test29_json_output.c 2>/dev/null)" || rc=$?
+    expect_eq "$rc" "1" "json mode: exit 1 when findings reported"
+
+    # Verify JSON shape is still {"files":[...]}
+    if echo "$json_out" | head -1 | grep -q '^{"files":\['; then
+        log_pass "json mode: output starts with {\"files\":[..."
+        passed=$((passed+1))
+    else
+        log_fail "json mode: output does not start with {\"files\":[..."
+        failed=$((failed+1))
+    fi
 }
 
 # ----------------------------------------------------------------------
@@ -730,6 +762,7 @@ main() {
     test_gcc_format_double_close
     test_suppressions
     test_inline_suppress
+    test_exit_codes
 
     echo
     if [ "$failed" -eq 0 ]; then

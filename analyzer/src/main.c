@@ -118,6 +118,8 @@ main_on_views(struct mc_preproc_hook *hook,
         }
 
         int error_count = (int)mc_report_get_run_issue_count();
+        if (error_count > 0)
+            ctx->exit_status = 1;
         mc_db_run_end(ctx->dbctx, &dbrun, error_count);
     } else {
         /* JSON mode: aggregate per-file JSON objects into a files[] array */
@@ -125,14 +127,18 @@ main_on_views(struct mc_preproc_hook *hook,
             printf(",\n");
         ctx->first_json = 0;
 
+        mc_report_reset_run_counters();
+
         if (!mc_ts_report_file_json_ex(path, pp_src, pp_len,
                                        lmap, lmap_count)) {
             fprintf(stderr, "\n/* analyzer: failed on %s */\n", path);
             ctx->exit_status = 1;
         }
 
-        /* For now we store error_count=0 as before */
-        mc_db_run_end(ctx->dbctx, &dbrun, 0);
+        int error_count = (int)mc_report_get_run_issue_count();
+        if (error_count > 0)
+            ctx->exit_status = 1;
+        mc_db_run_end(ctx->dbctx, &dbrun, error_count);
     }
 
     mc_inline_suppress_clear();

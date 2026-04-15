@@ -34,6 +34,11 @@ void mc_report_reset_run_counters(void)
     g_run_issues = 0;
 }
 
+void mc_report_count_issue(void)
+{
+    g_run_issues++;
+}
+
 unsigned long long mc_report_get_run_issue_count(void)
 {
     return g_run_issues;

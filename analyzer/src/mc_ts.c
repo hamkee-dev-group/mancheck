@@ -1369,10 +1369,12 @@ static void json_sink(const mc_ts_file *file,
     /* Only suppress entries that are actual diagnostics, matching
      * text_warning_sink semantics.  Checked/propagated calls pass
      * through even if their file+category is suppressed. */
-    if (is_diagnostic(file, info) &&
-        (mc_suppress_check(file->path, category) ||
-         mc_inline_suppress_check(info->line)))
-        return;
+    if (is_diagnostic(file, info)) {
+        if (mc_suppress_check(file->path, category) ||
+            mc_inline_suppress_check(info->line))
+            return;
+        mc_report_count_issue();
+    }
 
     if (!st->first_call) {
         printf(",\n");
