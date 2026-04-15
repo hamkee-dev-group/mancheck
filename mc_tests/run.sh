@@ -484,6 +484,59 @@ test_specdb_integration() {
 }
 
 # ----------------------------------------------------------------------
+# Test 12: GCC formatter – mixed categories
+# ----------------------------------------------------------------------
+test_gcc_format_mixed() {
+    log_info "=== Test 12: GCC formatter – mixed categories ==="
+
+    local src="mc_tests/tests/test27_mixed_categories.c"
+    local out
+    out="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --gcc --no-db "$src" 2>&1)"
+
+    local count
+    count="$(echo "$out" | grep -c '^mc_tests/tests/test27_mixed_categories\.c:.*: warning:' || true)"
+    expect_eq "$count" "4" "gcc format emits 4 warning-prefixed diagnostics"
+
+    for line_num in 11 14 17 20; do
+        if echo "$out" | grep -q "^mc_tests/tests/test27_mixed_categories\.c:${line_num}:5: warning:"; then
+            log_pass "gcc: diagnostic at line $line_num"
+            passed=$((passed+1))
+        else
+            log_fail "gcc: missing diagnostic at line $line_num"
+            failed=$((failed+1))
+        fi
+    done
+
+    echo "$out" | grep -q 'gets()'    && { log_pass "gcc: gets() message"; passed=$((passed+1)); } \
+                                       || { log_fail "gcc: gets() message missing"; failed=$((failed+1)); }
+    echo "$out" | grep -q 'read()'    && { log_pass "gcc: read() message"; passed=$((passed+1)); } \
+                                       || { log_fail "gcc: read() message missing"; failed=$((failed+1)); }
+    echo "$out" | grep -q 'printf()'  && { log_pass "gcc: printf() message"; passed=$((passed+1)); } \
+                                       || { log_fail "gcc: printf() message missing"; failed=$((failed+1)); }
+    echo "$out" | grep -q 'sprintf()' && { log_pass "gcc: sprintf() message"; passed=$((passed+1)); } \
+                                       || { log_fail "gcc: sprintf() message missing"; failed=$((failed+1)); }
+}
+
+# ----------------------------------------------------------------------
+# Test 13: GCC formatter – double_close
+# ----------------------------------------------------------------------
+test_gcc_format_double_close() {
+    log_info "=== Test 13: GCC formatter – double_close ==="
+
+    local src="mc_tests/tests/double_close.c"
+    local out
+    out="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --gcc --no-db "$src" 2>&1)"
+
+    if echo "$out" | grep -q 'warning: double_close: second call to close(fd); first at line 9'; then
+        log_pass "gcc: double_close diagnostic in GCC-style format"
+        passed=$((passed+1))
+    else
+        log_fail "gcc: double_close diagnostic missing or not GCC-formatted"
+        failed=$((failed+1))
+    fi
+}
+
+# ----------------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------------
 main() {
@@ -498,6 +551,8 @@ main() {
     test_no_db_mode
     test_db_fts_search
     test_specdb_integration
+    test_gcc_format_mixed
+    test_gcc_format_double_close
 
     echo
     if [ "$failed" -eq 0 ]; then

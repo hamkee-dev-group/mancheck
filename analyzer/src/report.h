@@ -3,6 +3,9 @@
 
 #include "mc_db_integration.h"
 
+/* Enable GCC-compatible output: "file:line:col: warning: ..." for all diags. */
+void mc_report_set_gcc_mode(int enabled);
+
 /* Set the current DB context + run for subsequent reports. */
 void mc_report_set_db(mc_db_ctx *ctx, mc_db_run *run);
 

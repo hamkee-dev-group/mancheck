@@ -10,6 +10,14 @@ static mc_db_run  g_dbrun;
 /* Per-run issue counter (for runs.error_count). */
 static unsigned long long g_run_issues = 0;
 
+/* GCC-compatible output mode. */
+static int g_gcc_mode = 0;
+
+void mc_report_set_gcc_mode(int enabled)
+{
+    g_gcc_mode = enabled;
+}
+
 void mc_report_set_db(mc_db_ctx *ctx, mc_db_run *run)
 {
     g_dbctx = ctx;
@@ -43,11 +51,13 @@ void mc_report_fact_kind(const char *file,
                          int quiet)
 {
     if (!quiet) {
-        printf("%s:%u:%u: %s\n",
-               file ? file : "<input>",
-               line,
-               column,
-               msg ? msg : "");
+        const char *m = msg ? msg : "";
+        if (g_gcc_mode && strncmp(m, "warning: ", 9) != 0)
+            printf("%s:%u:%u: warning: %s\n",
+                   file ? file : "<input>", line, column, m);
+        else
+            printf("%s:%u:%u: %s\n",
+                   file ? file : "<input>", line, column, m);
     }
     g_run_issues++;
 
@@ -80,10 +90,11 @@ void mc_report_issue(const char *file,
                      int quiet)
 {
     if (!quiet) {
-        printf("%s:%u:%u: ignored return of %s(): %s\n",
+        printf("%s:%u:%u: %signored return of %s(): %s\n",
                file ? file : "<input>",
                line,
                column,
+               g_gcc_mode ? "warning: " : "",
                func_name ? func_name : "<func>",
                msg ? msg : "");
     }

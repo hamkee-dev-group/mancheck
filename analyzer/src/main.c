@@ -12,7 +12,7 @@ static void
 print_usage(const char *prog)
 {
     fprintf(stderr,
-            "Usage: %s [--json] [--db PATH | --no-db] [--specdb PATH] [--dump-views PATH] <c-file> [c-file...]\n",
+            "Usage: %s [--json] [--gcc] [--db PATH | --no-db] [--specdb PATH] [--dump-views PATH] <c-file> [c-file...]\n",
             prog);
 }
 
@@ -143,6 +143,7 @@ main(int argc, char **argv)
     }
 
     int json = 0;
+    int gcc = 0;
     const char *db_path = "mancheck.db"; /* default DB path; NULL = disabled */
     const char *specdb_path = NULL;
     const char *dump_views_path = NULL;
@@ -160,6 +161,8 @@ main(int argc, char **argv)
 
         if (strcmp(arg, "--json") == 0) {
             json = 1;
+        } else if (strcmp(arg, "--gcc") == 0) {
+            gcc = 1;
         } else if (strcmp(arg, "--db") == 0) {
             if (i + 1 >= argc) {
                 fprintf(stderr, "%s: --db requires a path argument\n", argv[0]);
@@ -282,6 +285,9 @@ main(int argc, char **argv)
         .on_views  = main_on_views,
         .destroy   = NULL
     };
+
+    if (gcc)
+        mc_report_set_gcc_mode(1);
 
     int exit_status = 0;
 
