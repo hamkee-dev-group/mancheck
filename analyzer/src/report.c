@@ -2,6 +2,7 @@
 #include <string.h>
 
 #include "report.h"
+#include "mc_suppress.h"
 
 /* Current DB context for this run/file. */
 static mc_db_ctx *g_dbctx = NULL;
@@ -50,6 +51,9 @@ void mc_report_fact_kind(const char *file,
                          const char *msg,
                          int quiet)
 {
+    if (kind && mc_suppress_check(file, kind))
+        return;
+
     if (!quiet) {
         const char *m = msg ? msg : "";
         if (g_gcc_mode && strncmp(m, "warning: ", 9) != 0)
@@ -89,6 +93,9 @@ void mc_report_issue(const char *file,
                      const char *msg,
                      int quiet)
 {
+    if (mc_suppress_check(file, "return_value_check"))
+        return;
+
     if (!quiet) {
         printf("%s:%u:%u: %signored return of %s(): %s\n",
                file ? file : "<input>",

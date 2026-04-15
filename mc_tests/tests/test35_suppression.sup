@@ -1,0 +1,2 @@
+# Suppress return_value_check for test35
+test35_suppression.c return_value_check

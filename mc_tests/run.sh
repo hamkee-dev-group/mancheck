@@ -537,6 +537,102 @@ test_gcc_format_double_close() {
 }
 
 # ----------------------------------------------------------------------
+# Test 14: --suppressions config
+# ----------------------------------------------------------------------
+test_suppressions() {
+    log_info "=== Test 14: --suppressions config ==="
+
+    local src="mc_tests/tests/test35_suppression.c"
+    local sup="mc_tests/tests/test35_suppression.sup"
+
+    # Without suppressions: both warnings appear
+    local out_nosup
+    out_nosup="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --no-db "$src" 2>&1)"
+
+    local count_nosup
+    count_nosup="$(echo "$out_nosup" | grep -c ':' || true)"
+    expect_eq "$count_nosup" "2" "no suppression: 2 diagnostics"
+
+    # With suppressions: return_value_check suppressed, dangerous remains
+    local out_sup
+    out_sup="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --no-db --suppressions "$sup" "$src" 2>&1)"
+
+    local count_sup
+    count_sup="$(echo "$out_sup" | grep -c ':' || true)"
+    expect_eq "$count_sup" "1" "with suppression: 1 diagnostic remains"
+
+    if echo "$out_sup" | grep -q 'dangerous function gets()'; then
+        log_pass "suppression: dangerous_function warning still reported"
+        passed=$((passed+1))
+    else
+        log_fail "suppression: dangerous_function warning missing"
+        failed=$((failed+1))
+    fi
+
+    if echo "$out_sup" | grep -q 'read()'; then
+        log_fail "suppression: return_value_check should be suppressed"
+        failed=$((failed+1))
+    else
+        log_pass "suppression: return_value_check correctly suppressed"
+        passed=$((passed+1))
+    fi
+
+    # Same file with absolute path invocation
+    local abs_src
+    abs_src="$(cd "$ROOT_DIR" && realpath "$src")"
+    local out_abs
+    out_abs="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --no-db --suppressions "$sup" "$abs_src" 2>&1)"
+
+    local count_abs
+    count_abs="$(echo "$out_abs" | grep -c 'dangerous function gets()' || true)"
+    expect_eq "$count_abs" "1" "suppression works with absolute path invocation"
+
+    # Different file same category still reports
+    local out_other
+    out_other="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --no-db --suppressions "$sup" mc_tests/tests/test01_simple_unchecked.c 2>&1)"
+
+    local count_other
+    count_other="$(echo "$out_other" | grep -c 'read()' || true)"
+    expect_eq "$count_other" "1" "different file same category still reports"
+
+    # DB error_count reflects suppression
+    local sup_db="${ROOT_DIR}/mc_tests/suppress_test.db"
+    rm -f "$sup_db"
+    (cd "$ROOT_DIR" && "$ANALYZER_BIN" --db "$sup_db" --suppressions "$sup" "$src" >/dev/null 2>&1)
+
+    local db_count
+    db_count="$(sqlite3 "$sup_db" "SELECT error_count FROM runs ORDER BY rowid DESC LIMIT 1;" 2>/dev/null || echo "")"
+    expect_eq "$db_count" "1" "DB error_count reflects only unsuppressed findings"
+    rm -f "$sup_db"
+
+    # JSON mode: suppressed diagnostic absent, unsuppressed present
+    local out_json
+    out_json="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --json --no-db --suppressions "$sup" "$src" 2>/dev/null)"
+
+    local json_read_count
+    json_read_count="$(echo "$out_json" | grep -c '"read"' || true)"
+    expect_eq "$json_read_count" "0" "JSON mode: suppressed diagnostic absent"
+
+    local json_gets_count
+    json_gets_count="$(echo "$out_json" | grep -c '"gets"' || true)"
+    expect_eq "$json_gets_count" "1" "JSON mode: unsuppressed diagnostic present"
+
+    # JSON mode: checked calls in suppressed category still appear
+    local out_json_checked
+    out_json_checked="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --json --no-db --suppressions "$sup" mc_tests/tests/test28_binary_expr_check.c 2>/dev/null)"
+
+    local json_checked
+    json_checked="$(echo "$out_json_checked" | grep -c '"checked_cond"' || true)"
+    if [ "$json_checked" -gt 0 ]; then
+        log_pass "JSON mode: checked calls in suppressed category still appear"
+        passed=$((passed+1))
+    else
+        log_fail "JSON mode: checked calls in suppressed category should not be suppressed"
+        failed=$((failed+1))
+    fi
+}
+
+# ----------------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------------
 main() {
@@ -553,6 +649,7 @@ main() {
     test_specdb_integration
     test_gcc_format_mixed
     test_gcc_format_double_close
+    test_suppressions
 
     echo
     if [ "$failed" -eq 0 ]; then

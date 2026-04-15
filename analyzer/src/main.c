@@ -7,12 +7,13 @@
 #include "mc_db_integration.h"
 #include "report.h"
 #include "mc_preproc.h"
+#include "mc_suppress.h"
 
 static void
 print_usage(const char *prog)
 {
     fprintf(stderr,
-            "Usage: %s [--json] [--gcc] [--db PATH | --no-db] [--specdb PATH] [--dump-views PATH] <c-file> [c-file...]\n",
+            "Usage: %s [--json] [--gcc] [--db PATH | --no-db] [--specdb PATH] [--dump-views PATH] [--suppressions PATH] <c-file> [c-file...]\n",
             prog);
 }
 
@@ -147,6 +148,7 @@ main(int argc, char **argv)
     const char *db_path = "mancheck.db"; /* default DB path; NULL = disabled */
     const char *specdb_path = NULL;
     const char *dump_views_path = NULL;
+    const char *suppressions_path = NULL;
 
     /* First pass: parse options anywhere, collect file args separately */
     char **files = malloc((size_t)(argc - 1) * sizeof(char *));
@@ -187,6 +189,14 @@ main(int argc, char **argv)
                 return 1;
             }
             dump_views_path = argv[++i];
+        } else if (strcmp(arg, "--suppressions") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "%s: --suppressions requires a path argument\n",
+                        argv[0]);
+                free(files);
+                return 1;
+            }
+            suppressions_path = argv[++i];
         } else if (arg[0] == '-' && arg[1] == '-') {
             fprintf(stderr, "%s: unknown option: %s\n", argv[0], arg);
             free(files);
@@ -227,6 +237,17 @@ main(int argc, char **argv)
                     "warning: failed to load specdb '%s'; "
                     "specdb-based rules disabled\n",
                     specdb_path);
+        }
+    }
+
+    /* Optional: load suppression rules */
+    if (suppressions_path) {
+        if (mc_suppress_load(suppressions_path) != 0) {
+            fprintf(stderr, "error: cannot load suppressions file '%s'\n",
+                    suppressions_path);
+            mc_db_ctx_close(&dbctx);
+            free(files);
+            return 1;
         }
     }
 
@@ -319,6 +340,7 @@ main(int argc, char **argv)
     free(metas);
     if (dump_views)
         (void)fclose(dump_views);
+    mc_suppress_free();
     mc_rules_close_specdb();
     mc_db_ctx_close(&dbctx);
     return exit_status;

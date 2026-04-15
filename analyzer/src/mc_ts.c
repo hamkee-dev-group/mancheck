@@ -6,6 +6,7 @@
 #include "mc_ts.h"
 #include "mc_rules.h"
 #include "report.h"
+#include "mc_suppress.h"
 
 /* Provided by vendor/tree-sitter-c/src/parser.c */
 const TSLanguage *tree_sitter_c(void);
@@ -746,12 +747,13 @@ static void text_warning_sink(const mc_ts_file *file,
         snprintf(msg, sizeof(msg),
                  "warning: use of dangerous function %s()",
                  info->func_name);
-        mc_report_warning(file->path,
-                          info->line,
-                          info->col,
-                          info->func_name,
-                          msg,
-                          0);
+        mc_report_fact_kind(file->path,
+                            info->line,
+                            info->col,
+                            info->func_name,
+                            "dangerous_function",
+                            msg,
+                            0);
         return;
     }
 
@@ -760,12 +762,13 @@ static void text_warning_sink(const mc_ts_file *file,
             snprintf(msg, sizeof(msg),
                      "warning: non-literal format string in %s()",
                      info->func_name);
-            mc_report_warning(file->path,
-                              info->line,
-                              info->col,
-                              info->func_name,
-                              msg,
-                              0);
+            mc_report_fact_kind(file->path,
+                                info->line,
+                                info->col,
+                                info->func_name,
+                                "format_string",
+                                msg,
+                                0);
             return;
         }
     }
@@ -788,12 +791,13 @@ static void text_warning_sink(const mc_ts_file *file,
                      "stored but unchecked return value of %s()",
                      info->func_name);
 
-            mc_report_warning(file->path,
-                              info->line,
-                              info->col,
-                              info->func_name,
-                              msg,
-                              0);
+            mc_report_fact_kind(file->path,
+                                info->line,
+                                info->col,
+                                info->func_name,
+                                "return_value_check",
+                                msg,
+                                0);
         }
     }
 }
@@ -962,12 +966,13 @@ static void mc_extra_check_env_call(const mc_ts_file *f,
     uint32_t line = mc_ts_node_start_line(f, call);
     uint32_t col  = mc_ts_node_start_col(call);
 
-    mc_report_warning(f->path,
-                      line,
-                      col,
-                      symbol,
-                      msg,
-                      0);
+    mc_report_fact_kind(f->path,
+                        line,
+                        col,
+                        symbol,
+                        "insecure_env_usage",
+                        msg,
+                        0);
 }
 
 /* --- malloc_size_mismatch ------------------------------------------- */
@@ -1038,12 +1043,13 @@ static void mc_extra_check_declaration_malloc_mismatch(const mc_ts_file *f,
                  "malloc_size_mismatch: allocation for '%s' uses sizeof(%s); did you mean sizeof(*%s) or sizeof(type)?",
                  var_name, var_name, var_name);
 
-        mc_report_warning(f->path,
-                          line,
-                          col,
-                          var_name,
-                          msg,
-                          0);
+        mc_report_fact_kind(f->path,
+                            line,
+                            col,
+                            var_name,
+                            "malloc_size_mismatch",
+                            msg,
+                            0);
     }
 }
 
@@ -1216,12 +1222,13 @@ static void mc_extra_check_double_close_call(const mc_ts_file *f,
                      "double_close: second call to %s(%s); first at line %u",
                      name, var, table[i].first_line);
 
-            mc_report_warning(f->path,
-                              line,
-                              col,
-                              var,
-                              msg,
-                              0);
+            mc_report_fact_kind(f->path,
+                                line,
+                                col,
+                                var,
+                                "double_close",
+                                msg,
+                                0);
             return;
         }
     }
@@ -1334,20 +1341,43 @@ typedef struct {
     bool first_call;
 } json_state;
 
+/* Return true if this call info represents an actual diagnostic (i.e.,
+ * text_warning_sink would emit a warning for it). */
+static bool is_diagnostic(const mc_ts_file *file, const mc_call_info *info)
+{
+    if (info->flags & MC_FUNC_RULE_DANGEROUS)
+        return true;
+    if ((info->flags & MC_FUNC_RULE_FORMAT_STRING) &&
+        is_nonliteral_format_call(file, info))
+        return true;
+    if (info->flags & MC_FUNC_RULE_RETVAL_MUST_CHECK) {
+        if (info->status == MC_CALL_STATUS_UNCHECKED ||
+            info->status == MC_CALL_STATUS_IGNORED_EXPLICIT ||
+            info->status == MC_CALL_STATUS_STORED_UNCHECKED)
+            return true;
+    }
+    return false;
+}
+
 static void json_sink(const mc_ts_file *file,
                       const mc_call_info *info,
                       void *userdata) {
-    (void)file;
-
     json_state *st = (json_state *)userdata;
+
+    const char *category = mc_rules_category(info->flags);
+
+    /* Only suppress entries that are actual diagnostics, matching
+     * text_warning_sink semantics.  Checked/propagated calls pass
+     * through even if their file+category is suppressed. */
+    if (is_diagnostic(file, info) &&
+        mc_suppress_check(file->path, category))
+        return;
 
     if (!st->first_call) {
         printf(",\n");
     } else {
         st->first_call = false;
     }
-
-    const char *category = mc_rules_category(info->flags);
 
     printf("      {\"function\":");
     mc_json_escape(stdout, info->func_name);

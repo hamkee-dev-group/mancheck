@@ -32,6 +32,7 @@ SRCS = \
     src/mc_db_integration.c \
     libdb/mc_db.c \
     src/report.c \
+    src/mc_suppress.c \
     src/mc_preproc.c \
     $(TS_LIB_SRC) \
     $(TS_C_SRCS)

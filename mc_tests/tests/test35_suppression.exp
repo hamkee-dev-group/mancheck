@@ -1,0 +1,2 @@
+tests/test35_suppression.c:6:5: ignored return of read(): unchecked return value of read()
+tests/test35_suppression.c:7:5: warning: use of dangerous function gets()
