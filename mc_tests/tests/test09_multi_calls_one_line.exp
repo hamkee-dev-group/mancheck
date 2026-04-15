@@ -1,0 +1,2 @@
+tests/test09_multi_calls_one_line.c:5:17: ignored return of read(): unchecked return value of read()
+tests/test09_multi_calls_one_line.c:5:44: ignored return of write(): unchecked return value of write()

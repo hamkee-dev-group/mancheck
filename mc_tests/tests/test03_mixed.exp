@@ -1,0 +1,1 @@
+tests/test03_mixed.c:14:5: ignored return of write(): unchecked return value of write()

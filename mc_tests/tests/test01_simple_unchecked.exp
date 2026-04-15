@@ -1,0 +1,2 @@
+tests/test01_simple_unchecked.c:7:5: ignored return of read(): unchecked return value of read()
+tests/test01_simple_unchecked.c:8:5: ignored return of write(): unchecked return value of write()

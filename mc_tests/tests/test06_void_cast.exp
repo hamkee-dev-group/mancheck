@@ -1,0 +1,1 @@
+tests/test06_void_cast.c:6:11: ignored return of read(): unchecked return value of read()

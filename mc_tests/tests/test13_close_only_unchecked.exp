@@ -1,0 +1,1 @@
+tests/test13_close_only_unchecked.c:5:5: ignored return of close(): unchecked return value of close()

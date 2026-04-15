@@ -1,0 +1,1 @@
+tests/test08_macro_calls.c:16:5: ignored return of read(): unchecked return value of read()
