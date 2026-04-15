@@ -633,6 +633,85 @@ test_suppressions() {
 }
 
 # ----------------------------------------------------------------------
+# Test 15: Inline mc:ignore / NOLINT(mancheck)
+# ----------------------------------------------------------------------
+test_inline_suppress() {
+    log_info "=== Test 15: Inline mc:ignore / NOLINT(mancheck) ==="
+
+    local src="mc_tests/tests/test36_inline_suppress.c"
+
+    local out
+    out="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --no-db "$src" 2>&1)"
+
+    # 3 diagnostics: unsuppressed read (line 12), gets (line 14), read after string literal (line 18)
+    local count
+    count="$(echo "$out" | grep -c ':' || true)"
+    expect_eq "$count" "3" "inline suppress: 3 diagnostics remain"
+
+    # mc:ignore on same line suppresses read() at line 7
+    if echo "$out" | grep -q 'test36_inline_suppress\.c:7:'; then
+        log_fail "inline suppress: mc:ignore did not suppress line 7"
+        failed=$((failed+1))
+    else
+        log_pass "inline suppress: mc:ignore suppressed line 7"
+        passed=$((passed+1))
+    fi
+
+    # NOLINT(mancheck) on previous line suppresses read() at line 10
+    if echo "$out" | grep -q 'test36_inline_suppress\.c:10:'; then
+        log_fail "inline suppress: NOLINT(mancheck) did not suppress line 10"
+        failed=$((failed+1))
+    else
+        log_pass "inline suppress: NOLINT(mancheck) suppressed line 10"
+        passed=$((passed+1))
+    fi
+
+    # Unsuppressed read() at line 12 still reports
+    if echo "$out" | grep -q 'test36_inline_suppress\.c:12:.*read()'; then
+        log_pass "inline suppress: unsuppressed read() at line 12 reports"
+        passed=$((passed+1))
+    else
+        log_fail "inline suppress: unsuppressed read() at line 12 missing"
+        failed=$((failed+1))
+    fi
+
+    # gets() at line 14 still reports (different category)
+    if echo "$out" | grep -q 'test36_inline_suppress\.c:14:.*gets()'; then
+        log_pass "inline suppress: gets() at line 14 reports"
+        passed=$((passed+1))
+    else
+        log_fail "inline suppress: gets() at line 14 missing"
+        failed=$((failed+1))
+    fi
+
+    # "// mc:ignore" inside string literal must NOT suppress line 18
+    if echo "$out" | grep -q 'test36_inline_suppress\.c:18:.*read()'; then
+        log_pass "inline suppress: marker in string literal does not suppress"
+        passed=$((passed+1))
+    else
+        log_fail "inline suppress: false positive from marker in string literal"
+        failed=$((failed+1))
+    fi
+
+    # URL in string + real // mc:ignore comment DOES suppress line 21
+    if echo "$out" | grep -q 'test36_inline_suppress\.c:21:'; then
+        log_fail "inline suppress: marker after URL string not recognised"
+        failed=$((failed+1))
+    else
+        log_pass "inline suppress: marker after URL in string correctly suppresses"
+        passed=$((passed+1))
+    fi
+
+    # JSON mode: inline suppression also works
+    local out_json
+    out_json="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --json --no-db "$src" 2>/dev/null)"
+
+    local json_gets_count
+    json_gets_count="$(echo "$out_json" | grep -c '"gets"' || true)"
+    expect_eq "$json_gets_count" "1" "inline suppress JSON: gets() still present"
+}
+
+# ----------------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------------
 main() {
@@ -650,6 +729,7 @@ main() {
     test_gcc_format_mixed
     test_gcc_format_double_close
     test_suppressions
+    test_inline_suppress
 
     echo
     if [ "$failed" -eq 0 ]; then

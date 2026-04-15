@@ -53,6 +53,8 @@ void mc_report_fact_kind(const char *file,
 {
     if (kind && mc_suppress_check(file, kind))
         return;
+    if (mc_inline_suppress_check(line))
+        return;
 
     if (!quiet) {
         const char *m = msg ? msg : "";
@@ -94,6 +96,8 @@ void mc_report_issue(const char *file,
                      int quiet)
 {
     if (mc_suppress_check(file, "return_value_check"))
+        return;
+    if (mc_inline_suppress_check(line))
         return;
 
     if (!quiet) {

@@ -14,4 +14,19 @@ int mc_suppress_check(const char *file, const char *category);
 /* Free all loaded rules. */
 void mc_suppress_free(void);
 
+/* Scan raw source for inline suppression markers (// mc:ignore,
+ * // NOLINT(mancheck)) and record which original-source lines are
+ * suppressed.  Uses a state machine to skip string/char literals and
+ * block comments so that markers inside those contexts are ignored.
+ * Call before analysis; call mc_inline_suppress_clear() after.
+ * Only one file's inline state is active at a time. */
+void mc_inline_suppress_scan(const char *src_raw);
+
+/* Check whether original source line `line` (1-based) is suppressed
+ * by an inline comment. */
+int mc_inline_suppress_check(unsigned line);
+
+/* Free inline suppression state for the current file. */
+void mc_inline_suppress_clear(void);
+
 #endif

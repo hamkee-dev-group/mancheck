@@ -1370,7 +1370,8 @@ static void json_sink(const mc_ts_file *file,
      * text_warning_sink semantics.  Checked/propagated calls pass
      * through even if their file+category is suppressed. */
     if (is_diagnostic(file, info) &&
-        mc_suppress_check(file->path, category))
+        (mc_suppress_check(file->path, category) ||
+         mc_inline_suppress_check(info->line)))
         return;
 
     if (!st->first_call) {

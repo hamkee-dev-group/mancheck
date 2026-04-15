@@ -121,3 +121,168 @@ void mc_suppress_free(void)
     g_rule_count = 0;
     g_rule_cap   = 0;
 }
+
+/* --- inline (comment-based) suppression ------------------------------ */
+
+static unsigned *g_inline_lines;
+static size_t    g_inline_count;
+static size_t    g_inline_cap;
+
+static void inline_add(unsigned line)
+{
+    if (g_inline_count == g_inline_cap) {
+        size_t newcap = g_inline_cap ? g_inline_cap * 2 : 16;
+        unsigned *tmp = realloc(g_inline_lines, newcap * sizeof(*tmp));
+        if (!tmp)
+            return;
+        g_inline_lines = tmp;
+        g_inline_cap = newcap;
+    }
+    g_inline_lines[g_inline_count++] = line;
+}
+
+/* Check if the comment body (after //) starts with a suppression marker,
+ * skipping leading whitespace. */
+static int has_marker(const char *p, const char *eol)
+{
+    while (p < eol && (*p == ' ' || *p == '\t'))
+        p++;
+    if ((size_t)(eol - p) >= 9 && strncmp(p, "mc:ignore", 9) == 0)
+        return 1;
+    if ((size_t)(eol - p) >= 16 && strncmp(p, "NOLINT(mancheck)", 16) == 0)
+        return 1;
+    return 0;
+}
+
+/* Return 1 if everything before `comment_start` on the line starting
+ * at `line_start` is only whitespace (i.e. a comment-only line). */
+static int is_comment_only(const char *line_start, const char *comment_start)
+{
+    const char *p = line_start;
+    while (p < comment_start) {
+        if (*p != ' ' && *p != '\t')
+            return 0;
+        p++;
+    }
+    return 1;
+}
+
+void mc_inline_suppress_scan(const char *src_raw)
+{
+    if (!src_raw)
+        return;
+
+    /*
+     * State machine that tracks C lexical context so we only recognise
+     * // comments that are actual comments (not inside strings, char
+     * literals, or block comments).
+     */
+    enum {
+        ST_CODE,
+        ST_STRING,          /* inside "..." */
+        ST_STRING_ESC,      /* backslash inside string */
+        ST_CHAR,            /* inside '...' */
+        ST_CHAR_ESC,        /* backslash inside char literal */
+        ST_SLASH,           /* seen '/' in code context */
+        ST_LINE_COMMENT,    /* inside // ... */
+        ST_BLOCK_COMMENT,   /* inside / * ... */
+        ST_BLOCK_STAR       /* seen '*' inside block comment */
+    } state = ST_CODE;
+
+    unsigned lineno = 1;
+    const char *line_start = src_raw;
+    const char *comment_start = NULL; /* where // began */
+
+    for (const char *p = src_raw; *p; p++) {
+        char c = *p;
+
+        switch (state) {
+        case ST_CODE:
+            if (c == '"')       state = ST_STRING;
+            else if (c == '\'') state = ST_CHAR;
+            else if (c == '/')  { state = ST_SLASH; comment_start = p; }
+            break;
+
+        case ST_STRING:
+            if (c == '\\')      state = ST_STRING_ESC;
+            else if (c == '"')  state = ST_CODE;
+            else if (c == '\n') state = ST_CODE; /* unterminated string */
+            break;
+
+        case ST_STRING_ESC:
+            state = ST_STRING;
+            break;
+
+        case ST_CHAR:
+            if (c == '\\')      state = ST_CHAR_ESC;
+            else if (c == '\'') state = ST_CODE;
+            else if (c == '\n') state = ST_CODE;
+            break;
+
+        case ST_CHAR_ESC:
+            state = ST_CHAR;
+            break;
+
+        case ST_SLASH:
+            if (c == '/') {
+                state = ST_LINE_COMMENT;
+                /* p points at the second '/', comment body starts at p+1 */
+                const char *eol = p + 1;
+                while (*eol && *eol != '\n')
+                    eol++;
+                if (has_marker(p + 1, eol)) {
+                    if (is_comment_only(line_start, comment_start))
+                        inline_add(lineno + 1);
+                    else
+                        inline_add(lineno);
+                }
+            } else if (c == '*') {
+                state = ST_BLOCK_COMMENT;
+            } else {
+                state = ST_CODE;
+                /* Re-examine current char in CODE state */
+                if (c == '"')       state = ST_STRING;
+                else if (c == '\'') state = ST_CHAR;
+                else if (c == '/')  { state = ST_SLASH; comment_start = p; }
+            }
+            break;
+
+        case ST_LINE_COMMENT:
+            /* handled at newline below */
+            break;
+
+        case ST_BLOCK_COMMENT:
+            if (c == '*') state = ST_BLOCK_STAR;
+            break;
+
+        case ST_BLOCK_STAR:
+            if (c == '/')      state = ST_CODE;
+            else if (c != '*') state = ST_BLOCK_COMMENT;
+            break;
+        }
+
+        if (c == '\n') {
+            lineno++;
+            line_start = p + 1;
+            if (state == ST_LINE_COMMENT)
+                state = ST_CODE;
+        }
+    }
+}
+
+int mc_inline_suppress_check(unsigned line)
+{
+    for (size_t i = 0; i < g_inline_count; i++) {
+        if (g_inline_lines[i] == line)
+            return 1;
+    }
+    return 0;
+}
+
+void mc_inline_suppress_clear(void)
+{
+    free(g_inline_lines);
+    g_inline_lines = NULL;
+    g_inline_count = 0;
+    g_inline_cap   = 0;
+}

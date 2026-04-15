@@ -92,6 +92,9 @@ main_on_views(struct mc_preproc_hook *hook,
         fputs("}\n", out);
     }
 
+    /* Scan raw source for inline suppression markers before analysis. */
+    mc_inline_suppress_scan(views->src_raw);
+
     mc_db_run dbrun;
     memset(&dbrun, 0, sizeof(dbrun));
 
@@ -132,6 +135,7 @@ main_on_views(struct mc_preproc_hook *hook,
         mc_db_run_end(ctx->dbctx, &dbrun, 0);
     }
 
+    mc_inline_suppress_clear();
     return 0; /* continue pipeline */
 }
 
