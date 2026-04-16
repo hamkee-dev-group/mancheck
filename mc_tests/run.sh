@@ -1040,6 +1040,100 @@ test_preprocess_compile_cmd_std() {
 }
 
 # ----------------------------------------------------------------------
+# Test 21: CLI error-path integration tests
+# ----------------------------------------------------------------------
+test_cli_error_paths() {
+    log_info "=== Test 21: CLI error-path integration tests ==="
+
+    local rc out
+    local src="${ROOT_DIR}/mc_tests/tests/test01_simple_unchecked.c"
+
+    # --db missing argument
+    rc=0
+    out="$("$ANALYZER_BIN" --db 2>&1)" || rc=$?
+    expect_eq "$rc" "1" "cli: --db missing arg exits 1"
+    if echo "$out" | grep -q -- '--db requires a path argument'; then
+        log_pass "cli: --db missing arg error message"
+        passed=$((passed+1))
+    else
+        log_fail "cli: --db missing arg error message"
+        failed=$((failed+1))
+    fi
+
+    # --specdb missing argument
+    rc=0
+    out="$("$ANALYZER_BIN" --specdb 2>&1)" || rc=$?
+    expect_eq "$rc" "1" "cli: --specdb missing arg exits 1"
+    if echo "$out" | grep -q -- '--specdb requires a path argument'; then
+        log_pass "cli: --specdb missing arg error message"
+        passed=$((passed+1))
+    else
+        log_fail "cli: --specdb missing arg error message"
+        failed=$((failed+1))
+    fi
+
+    # --dump-views missing argument
+    rc=0
+    out="$("$ANALYZER_BIN" --dump-views 2>&1)" || rc=$?
+    expect_eq "$rc" "1" "cli: --dump-views missing arg exits 1"
+    if echo "$out" | grep -q -- '--dump-views requires a path argument'; then
+        log_pass "cli: --dump-views missing arg error message"
+        passed=$((passed+1))
+    else
+        log_fail "cli: --dump-views missing arg error message"
+        failed=$((failed+1))
+    fi
+
+    # --suppressions missing argument
+    rc=0
+    out="$("$ANALYZER_BIN" --suppressions 2>&1)" || rc=$?
+    expect_eq "$rc" "1" "cli: --suppressions missing arg exits 1"
+    if echo "$out" | grep -q -- '--suppressions requires a path argument'; then
+        log_pass "cli: --suppressions missing arg error message"
+        passed=$((passed+1))
+    else
+        log_fail "cli: --suppressions missing arg error message"
+        failed=$((failed+1))
+    fi
+
+    # Unknown option
+    rc=0
+    out="$("$ANALYZER_BIN" --bogus-flag "$src" 2>&1)" || rc=$?
+    expect_eq "$rc" "1" "cli: unknown option exits 1"
+    if echo "$out" | grep -q 'unknown option: --bogus-flag'; then
+        log_pass "cli: unknown option error message"
+        passed=$((passed+1))
+    else
+        log_fail "cli: unknown option error message"
+        failed=$((failed+1))
+    fi
+
+    # Nonexistent suppressions file
+    rc=0
+    out="$("$ANALYZER_BIN" --no-db --suppressions /tmp/nonexistent_mancheck_sup_$$.sup "$src" 2>&1)" || rc=$?
+    expect_eq "$rc" "1" "cli: nonexistent suppressions file exits 1"
+    if echo "$out" | grep -q 'cannot load suppressions file'; then
+        log_pass "cli: nonexistent suppressions file error message"
+        passed=$((passed+1))
+    else
+        log_fail "cli: nonexistent suppressions file error message"
+        failed=$((failed+1))
+    fi
+
+    # Unwritable dump-views target
+    rc=0
+    out="$("$ANALYZER_BIN" --no-db --dump-views /nonexistent_dir_$$/views.jsonl "$src" 2>&1)" || rc=$?
+    expect_eq "$rc" "1" "cli: unwritable dump-views target exits 1"
+    if echo "$out" | grep -q 'cannot open .* for writing'; then
+        log_pass "cli: unwritable dump-views target error message"
+        passed=$((passed+1))
+    else
+        log_fail "cli: unwritable dump-views target error message"
+        failed=$((failed+1))
+    fi
+}
+
+# ----------------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------------
 main() {
@@ -1064,6 +1158,7 @@ main() {
     test_json_issue_count
     test_db_extra_check_facts
     test_preprocess_compile_cmd_std
+    test_cli_error_paths
 
     echo
     if [ "$failed" -eq 0 ]; then
