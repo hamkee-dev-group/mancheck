@@ -1,0 +1,2 @@
+tests/test37_call_classification.c:29:5: ignored return of close(): unchecked return value of close()
+tests/test37_call_classification.c:69:15: stored but unchecked return value of malloc()
