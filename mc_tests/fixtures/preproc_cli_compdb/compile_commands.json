@@ -1,0 +1,25 @@
+[
+  {
+    "directory": ".",
+    "file": "preproc_cli_compdb_macro.c",
+    "arguments": [
+      "clang",
+      "-c",
+      "-I",
+      "include dir",
+      "-DMANCHECK_COMPILE_DB_FLAG=1",
+      "preproc_cli_compdb_macro.c"
+    ]
+  },
+  {
+    "directory": ".",
+    "file": "preproc_cli_compdb_std.c",
+    "arguments": [
+      "clang",
+      "-c",
+      "-std",
+      "gnu2x",
+      "preproc_cli_compdb_std.c"
+    ]
+  }
+]

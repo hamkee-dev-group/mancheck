@@ -8,7 +8,10 @@ typedef struct {
     const char *abs_path;    /* absolute path for I/O / clang -E */
     const char *language;    /* "c", "h", ... */
     const char *compiler;    /* "clang", "gcc", ... */
+    const char *compile_dir; /* optional working directory from compile DB */
     const char *compile_cmd; /* optional, full compile command */
+    const char *const *compile_argv; /* optional, preserved compile argv */
+    size_t compile_argc;
     const char *git_commit;  /* optional, HEAD sha */
     const char *git_status;  /* "M", "A", "D", ... */
 } mc_file_meta;

@@ -1126,10 +1126,67 @@ test_preprocess_compile_cmd_std() {
 }
 
 # ----------------------------------------------------------------------
-# Test 21: CLI error-path integration tests
+# Test 21: analyzer CLI compile_commands integration
+# ----------------------------------------------------------------------
+test_analyzer_compile_commands_integration() {
+    log_info "=== Test 21: analyzer --compile-commands integration ==="
+
+    local compdb="${ROOT_DIR}/mc_tests/fixtures/preproc_cli_compdb/compile_commands.json"
+    local macro_src="mc_tests/fixtures/preproc_cli_compdb/preproc_cli_compdb_macro.c"
+    local std_src="mc_tests/fixtures/preproc_cli_compdb/preproc_cli_compdb_std.c"
+    local fallback_src="mc_tests/fixtures/preproc_std_fixture.c"
+    local views="${OUT_DIR}/compile_commands_views.jsonl"
+    local macro_line std_line fallback_line
+
+    rm -f "$views"
+
+    (
+        cd "$ROOT_DIR"
+        "$ANALYZER_BIN" --no-db --compile-commands "$compdb" \
+            --dump-views "$views" \
+            "$macro_src" "$std_src" "$fallback_src" >/dev/null 2>&1
+    )
+
+    if [ ! -s "$views" ]; then
+        log_fail "compile_commands integration: dump-views output missing"
+        failed=$((failed+1))
+        return
+    fi
+
+    macro_line="$(grep -F 'preproc_cli_compdb_macro.c' "$views" || true)"
+    if echo "$macro_line" | grep -Fq 'compile-cmd-macro' &&
+       echo "$macro_line" | grep -Fq 'compile-cmd-include'; then
+        log_pass "compile_commands arguments array preserves spaced -I and -D"
+        passed=$((passed+1))
+    else
+        log_fail "compile_commands arguments array lost spaced -I or -D semantics"
+        failed=$((failed+1))
+    fi
+
+    std_line="$(grep -F 'preproc_cli_compdb_std.c' "$views" || true)"
+    if echo "$std_line" | grep -Fq 'std-c2x'; then
+        log_pass "compile_commands per-file -std affects preprocessing"
+        passed=$((passed+1))
+    else
+        log_fail "compile_commands per-file -std did not affect preprocessing"
+        failed=$((failed+1))
+    fi
+
+    fallback_line="$(grep -F 'preproc_std_fixture.c' "$views" || true)"
+    if echo "$fallback_line" | grep -Fq 'std-c11'; then
+        log_pass "compile_commands no-match keeps default preprocessing flags"
+        passed=$((passed+1))
+    else
+        log_fail "compile_commands no-match changed default preprocessing flags"
+        failed=$((failed+1))
+    fi
+}
+
+# ----------------------------------------------------------------------
+# Test 22: CLI error-path integration tests
 # ----------------------------------------------------------------------
 test_cli_error_paths() {
-    log_info "=== Test 21: CLI error-path integration tests ==="
+    log_info "=== Test 22: CLI error-path integration tests ==="
 
     local rc out
     local src="${ROOT_DIR}/mc_tests/tests/test01_simple_unchecked.c"
@@ -1155,6 +1212,18 @@ test_cli_error_paths() {
         passed=$((passed+1))
     else
         log_fail "cli: --specdb missing arg error message"
+        failed=$((failed+1))
+    fi
+
+    # --compile-commands missing argument
+    rc=0
+    out="$("$ANALYZER_BIN" --compile-commands 2>&1)" || rc=$?
+    expect_eq "$rc" "1" "cli: --compile-commands missing arg exits 1"
+    if echo "$out" | grep -q -- '--compile-commands requires a path argument'; then
+        log_pass "cli: --compile-commands missing arg error message"
+        passed=$((passed+1))
+    else
+        log_fail "cli: --compile-commands missing arg error message"
         failed=$((failed+1))
     fi
 
@@ -1246,6 +1315,7 @@ main() {
     test_json_diagnostics
     test_db_extra_check_facts
     test_preprocess_compile_cmd_std
+    test_analyzer_compile_commands_integration
     test_cli_error_paths
 
     echo

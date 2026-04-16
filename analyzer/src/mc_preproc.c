@@ -255,7 +255,7 @@ mc_argv_builder_push(mc_argv_builder *builder, const char *arg)
 }
 
 static char *
-mc_capture_argv_output(char *const argv[])
+mc_capture_argv_output(char *const argv[], const char *workdir)
 {
     int pipefd[2];
     if (pipe(pipefd) != 0)
@@ -286,6 +286,9 @@ mc_capture_argv_output(char *const argv[])
             if (devnull != STDERR_FILENO)
                 (void)close(devnull);
         }
+
+        if (workdir && workdir[0] != '\0' && chdir(workdir) != 0)
+            _exit(127);
 
         execvp(argv[0], argv);
         _exit(127);
@@ -547,6 +550,78 @@ mc_append_compile_cmd_flags(mc_argv_builder *builder, const char *compile_cmd)
     return rc;
 }
 
+static int
+mc_append_compile_argv_flags(mc_argv_builder *builder,
+                             const char *const *compile_argv,
+                             size_t compile_argc)
+{
+    if (!compile_argv || compile_argc == 0)
+        return 0;
+
+    int rc = 0;
+    size_t start = 0;
+
+    if (compile_argv[0] && compile_argv[0][0] != '-')
+        start = 1;
+
+    for (size_t i = start; i < compile_argc; i++)
+    {
+        const char *tok = compile_argv[i];
+        if (!tok)
+            continue;
+
+        if (mc_compile_cmd_flag_is_inline(tok))
+        {
+            if (mc_argv_builder_push(builder, tok) != 0)
+            {
+                rc = -1;
+                break;
+            }
+            continue;
+        }
+
+        if (mc_compile_cmd_flag_has_value(tok))
+        {
+            const char *next = (i + 1 < compile_argc) ? compile_argv[i + 1] : NULL;
+            if (!next || next[0] == '\0')
+            {
+                rc = -1;
+                break;
+            }
+
+            if (strcmp(tok, "-std") == 0)
+            {
+                size_t len = strlen(next) + strlen("-std=") + 1;
+                char *joined = malloc(len);
+                if (!joined)
+                {
+                    rc = -1;
+                    break;
+                }
+                (void)snprintf(joined, len, "-std=%s", next);
+                if (mc_argv_builder_push(builder, joined) != 0)
+                    rc = -1;
+                free(joined);
+                if (rc != 0)
+                    break;
+            }
+            else
+            {
+                if (mc_argv_builder_push(builder, tok) != 0 ||
+                    mc_argv_builder_push(builder, next) != 0)
+                {
+                    rc = -1;
+                    break;
+                }
+            }
+
+            i++;
+        }
+    }
+
+    return rc;
+}
+
 /* Best-effort clang -E:
  * - on success: fills views->src_pp
  * - on failure: leaves src_pp == NULL but returns 0 so pipeline continues
@@ -565,6 +640,9 @@ int mc_preprocess_clang(mc_source_views *views,
     if (mc_argv_builder_push(&argv, clang) != 0 ||
         mc_argv_builder_push(&argv, "-E") != 0 ||
         mc_append_tokenized_flags(&argv, extra) != 0 ||
+        mc_append_compile_argv_flags(&argv,
+                                     views->meta.compile_argv,
+                                     views->meta.compile_argc) != 0 ||
         mc_append_compile_cmd_flags(&argv, views->meta.compile_cmd) != 0 ||
         mc_argv_builder_push(&argv, path) != 0)
     {
@@ -572,7 +650,7 @@ int mc_preprocess_clang(mc_source_views *views,
         return -1;
     }
 
-    char *out = mc_capture_argv_output(argv.argv);
+    char *out = mc_capture_argv_output(argv.argv, views->meta.compile_dir);
     mc_argv_builder_free(&argv);
 
     if (!out)
