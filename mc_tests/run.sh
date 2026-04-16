@@ -968,6 +968,60 @@ test_inline_suppress_nolint_next_warn() {
 }
 
 # ----------------------------------------------------------------------
+# Test 15d: Same-line mc:ignore suppresses only one diagnostic
+# ----------------------------------------------------------------------
+test_inline_suppress_same_line_scope() {
+    log_info "=== Test 15d: same-line mc:ignore suppresses one diagnostic ==="
+
+    local src="mc_tests/tests/test40_suppress_scope.c"
+    local out
+    out="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --no-db "$src" 2>&1)" || true
+
+    local count
+    count="$(echo "$out" | grep -c '^mc_tests/tests/test40_suppress_scope\.c:' || true)"
+    expect_eq "$count" "1" "same-line inline suppress: exactly one diagnostic remains"
+
+    if echo "$out" | grep -q 'test40_suppress_scope\.c:7:.*read()'; then
+        log_fail "same-line inline suppress: first diagnostic should be suppressed"
+        failed=$((failed+1))
+    else
+        log_pass "same-line inline suppress: first diagnostic consumed by marker"
+        passed=$((passed+1))
+    fi
+
+    if echo "$out" | grep -q 'test40_suppress_scope\.c:7:.*gets()'; then
+        log_pass "same-line inline suppress: second diagnostic still reports"
+        passed=$((passed+1))
+    else
+        log_fail "same-line inline suppress: second diagnostic missing"
+        failed=$((failed+1))
+    fi
+
+    local out_json
+    out_json="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --json --no-db "$src" 2>/dev/null)" || true
+
+    local json_issue_count
+    json_issue_count="$(echo "$out_json" | grep -o '"issue_count":[0-9]*' | head -n1 | cut -d: -f2)"
+    expect_eq "$json_issue_count" "1" "same-line inline suppress JSON: issue_count is 1"
+
+    if echo "$out_json" | grep -q '"function":"read"'; then
+        log_fail "same-line inline suppress JSON: suppressed diagnostic still present"
+        failed=$((failed+1))
+    else
+        log_pass "same-line inline suppress JSON: suppressed diagnostic absent"
+        passed=$((passed+1))
+    fi
+
+    if echo "$out_json" | grep -q '"function":"gets"'; then
+        log_pass "same-line inline suppress JSON: remaining diagnostic preserved"
+        passed=$((passed+1))
+    else
+        log_fail "same-line inline suppress JSON: remaining diagnostic missing"
+        failed=$((failed+1))
+    fi
+}
+
+# ----------------------------------------------------------------------
 # Test 16a: SARIF output mode
 # ----------------------------------------------------------------------
 test_sarif_output() {
@@ -1587,6 +1641,7 @@ main() {
     test_inline_suppress
     test_inline_suppress_comment_only_chain
     test_inline_suppress_nolint_next_warn
+    test_inline_suppress_same_line_scope
     test_sarif_output
     test_warn_exit
     test_gcc_sarif_default_exit

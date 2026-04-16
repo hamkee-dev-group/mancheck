@@ -300,8 +300,14 @@ int mc_inline_suppress_check(unsigned line)
     }
 
     for (size_t i = 0; i < g_inline_same_count; i++) {
-        if (g_inline_same_line[i] == line)
+        if (g_inline_same_line[i] == line) {
+            memmove(&g_inline_same_line[i],
+                    &g_inline_same_line[i + 1],
+                    (g_inline_same_count - i - 1) *
+                    sizeof(*g_inline_same_line));
+            g_inline_same_count--;
             return 1;
+        }
     }
 
     return suppressed;
