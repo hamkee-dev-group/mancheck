@@ -13,7 +13,7 @@ static void
 print_usage(const char *prog)
 {
     fprintf(stderr,
-            "Usage: %s [--json] [--gcc] [--db PATH | --no-db] [--specdb PATH] [--dump-views PATH] [--suppressions PATH] <c-file> [c-file...]\n",
+            "Usage: %s [--json] [--gcc] [--warn-exit] [--db PATH | --no-db] [--specdb PATH] [--dump-views PATH] [--suppressions PATH] <c-file> [c-file...]\n",
             prog);
 }
 
@@ -55,6 +55,7 @@ struct mc_main_ctx {
     int json_mode;       /* 0 = text, 1 = JSON */
     int first_json;      /* for printing commas between JSON files */
     int exit_status;     /* 0 if all good, 1 if any file failed */
+    int warn_exit;       /* --warn-exit: exit non-zero on findings */
     FILE *dump_views;    /* NULL = disabled, otherwise JSONL output */
 };
 
@@ -118,7 +119,7 @@ main_on_views(struct mc_preproc_hook *hook,
         }
 
         int error_count = (int)mc_report_get_run_issue_count();
-        if (error_count > 0)
+        if (error_count > 0 && ctx->warn_exit)
             ctx->exit_status = 1;
         mc_db_run_end(ctx->dbctx, &dbrun, error_count);
     } else {
@@ -136,7 +137,7 @@ main_on_views(struct mc_preproc_hook *hook,
         }
 
         int error_count = (int)mc_report_get_run_issue_count();
-        if (error_count > 0)
+        if (error_count > 0 && ctx->warn_exit)
             ctx->exit_status = 1;
         mc_db_run_end(ctx->dbctx, &dbrun, error_count);
     }
@@ -155,6 +156,7 @@ main(int argc, char **argv)
 
     int json = 0;
     int gcc = 0;
+    int warn_exit = 0;
     const char *db_path = "mancheck.db"; /* default DB path; NULL = disabled */
     const char *specdb_path = NULL;
     const char *dump_views_path = NULL;
@@ -175,6 +177,8 @@ main(int argc, char **argv)
             json = 1;
         } else if (strcmp(arg, "--gcc") == 0) {
             gcc = 1;
+        } else if (strcmp(arg, "--warn-exit") == 0) {
+            warn_exit = 1;
         } else if (strcmp(arg, "--db") == 0) {
             if (i + 1 >= argc) {
                 fprintf(stderr, "%s: --db requires a path argument\n", argv[0]);
@@ -308,6 +312,7 @@ main(int argc, char **argv)
         .json_mode   = json,
         .first_json  = 1,
         .exit_status = 0,
+        .warn_exit   = warn_exit,
         .dump_views  = dump_views
     };
 

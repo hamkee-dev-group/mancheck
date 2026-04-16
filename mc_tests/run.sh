@@ -712,35 +712,49 @@ test_inline_suppress() {
 }
 
 # ----------------------------------------------------------------------
-# Test 16: Exit codes – non-zero on findings, zero when clean
+# Test 16: --warn-exit flag
 # ----------------------------------------------------------------------
-test_exit_codes() {
-    log_info "=== Test 16: Exit codes ==="
+test_warn_exit() {
+    log_info "=== Test 16: --warn-exit flag ==="
 
-    # Text mode: findings → exit 1
+    # Without --warn-exit: findings → exit 0
     local rc=0
-    (cd "$ROOT_DIR" && "$ANALYZER_BIN" --no-db mc_tests/tests/test01_simple_unchecked.c >/dev/null 2>&1) || rc=$?
-    expect_eq "$rc" "1" "text mode: exit 1 when findings reported"
+    (cd "$ROOT_DIR" && "$ANALYZER_BIN" --no-db mc_tests/tests/test16_dangerous_functions.c >/dev/null 2>&1) || rc=$?
+    expect_eq "$rc" "0" "no --warn-exit: exit 0 despite findings"
 
-    # Text mode: clean file → exit 0
+    # With --warn-exit: findings → exit 1
     rc=0
-    (cd "$ROOT_DIR" && "$ANALYZER_BIN" --no-db mc_tests/tests/test30_clean_file.c >/dev/null 2>&1) || rc=$?
-    expect_eq "$rc" "0" "text mode: exit 0 when no findings"
+    (cd "$ROOT_DIR" && "$ANALYZER_BIN" --warn-exit --no-db mc_tests/tests/test16_dangerous_functions.c >/dev/null 2>&1) || rc=$?
+    expect_eq "$rc" "1" "--warn-exit text mode: exit 1 when findings reported"
 
-    # JSON mode: findings → exit 1, valid JSON
+    # With --warn-exit: clean file → exit 0
+    rc=0
+    (cd "$ROOT_DIR" && "$ANALYZER_BIN" --warn-exit --no-db mc_tests/tests/test30_clean_file.c >/dev/null 2>&1) || rc=$?
+    expect_eq "$rc" "0" "--warn-exit text mode: exit 0 when no findings"
+
+    # JSON mode without --warn-exit: findings → exit 0
+    rc=0
+    (cd "$ROOT_DIR" && "$ANALYZER_BIN" --json --no-db mc_tests/tests/test16_dangerous_functions.c >/dev/null 2>&1) || rc=$?
+    expect_eq "$rc" "0" "no --warn-exit json mode: exit 0 despite findings"
+
+    # JSON mode with --warn-exit: findings → exit 1, valid JSON
     rc=0
     local json_out
-    json_out="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --json --no-db mc_tests/tests/test29_json_output.c 2>/dev/null)" || rc=$?
-    expect_eq "$rc" "1" "json mode: exit 1 when findings reported"
+    json_out="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --json --warn-exit --no-db mc_tests/tests/test16_dangerous_functions.c 2>/dev/null)" || rc=$?
+    expect_eq "$rc" "1" "--warn-exit json mode: exit 1 when findings reported"
 
-    # Verify JSON shape is still {"files":[...]}
     if echo "$json_out" | head -1 | grep -q '^{"files":\['; then
-        log_pass "json mode: output starts with {\"files\":[..."
+        log_pass "--warn-exit json mode: valid JSON output"
         passed=$((passed+1))
     else
-        log_fail "json mode: output does not start with {\"files\":[..."
+        log_fail "--warn-exit json mode: invalid JSON output"
         failed=$((failed+1))
     fi
+
+    # JSON mode with --warn-exit: clean file → exit 0
+    rc=0
+    (cd "$ROOT_DIR" && "$ANALYZER_BIN" --json --warn-exit --no-db mc_tests/tests/test30_clean_file.c >/dev/null 2>&1) || rc=$?
+    expect_eq "$rc" "0" "--warn-exit json mode: exit 0 when no findings"
 }
 
 # ----------------------------------------------------------------------
@@ -762,7 +776,7 @@ main() {
     test_gcc_format_double_close
     test_suppressions
     test_inline_suppress
-    test_exit_codes
+    test_warn_exit
 
     echo
     if [ "$failed" -eq 0 ]; then
