@@ -13,7 +13,7 @@ static void
 print_usage(const char *prog)
 {
     fprintf(stderr,
-            "Usage: %s [--json] [--gcc] [--warn-exit] [--db PATH | --no-db] [--specdb PATH] [--dump-views PATH] [--suppressions PATH] <c-file> [c-file...]\n",
+            "Usage: %s [--json | --sarif] [--gcc] [--warn-exit] [--db PATH | --no-db] [--specdb PATH] [--dump-views PATH] [--suppressions PATH] <c-file> [c-file...]\n",
             prog);
 }
 
@@ -53,7 +53,9 @@ json_escape_string(FILE *out, const char *s)
 struct mc_main_ctx {
     mc_db_ctx *dbctx;
     int json_mode;       /* 0 = text, 1 = JSON */
+    int sarif_mode;      /* 0 = off, 1 = SARIF */
     int first_json;      /* for printing commas between JSON files */
+    int first_sarif;     /* for printing commas between SARIF results */
     int exit_status;     /* 0 if all good, 1 if any file failed */
     int warn_exit;       /* --warn-exit: exit non-zero on findings */
     FILE *dump_views;    /* NULL = disabled, otherwise JSONL output */
@@ -108,7 +110,7 @@ main_on_views(struct mc_preproc_hook *hook,
     const unsigned *lmap = views->pp_user_line_map;
     size_t lmap_count = views->pp_user_line_count;
 
-    if (!ctx->json_mode) {
+    if (!ctx->json_mode && !ctx->sarif_mode) {
         /* Text mode: warnings only, track issue count in DB run */
         mc_report_reset_run_counters();
 
@@ -122,7 +124,7 @@ main_on_views(struct mc_preproc_hook *hook,
         if (error_count > 0 && ctx->warn_exit)
             ctx->exit_status = 1;
         mc_db_run_end(ctx->dbctx, &dbrun, error_count);
-    } else {
+    } else if (ctx->json_mode) {
         /* JSON mode: aggregate per-file JSON objects into a files[] array */
         if (!ctx->first_json)
             printf(",\n");
@@ -134,6 +136,23 @@ main_on_views(struct mc_preproc_hook *hook,
                                        lmap, lmap_count)) {
             fprintf(stderr, "\n/* analyzer: failed on %s */\n", path);
             ctx->exit_status = 1;
+        }
+
+        int error_count = (int)mc_report_get_run_issue_count();
+        if (error_count > 0 && ctx->warn_exit)
+            ctx->exit_status = 1;
+        mc_db_run_end(ctx->dbctx, &dbrun, error_count);
+    } else {
+        mc_report_reset_run_counters();
+
+        if (!mc_ts_report_file_sarif_ex(path, pp_src, pp_len,
+                                        lmap, lmap_count,
+                                        &ctx->first_sarif)) {
+            fprintf(stderr, "analyzer: failed on %s\n", path);
+            ctx->exit_status = 1;
+            mc_db_run_end(ctx->dbctx, &dbrun, 1);
+            mc_inline_suppress_clear();
+            return 1;
         }
 
         int error_count = (int)mc_report_get_run_issue_count();
@@ -155,6 +174,7 @@ main(int argc, char **argv)
     }
 
     int json = 0;
+    int sarif = 0;
     int gcc = 0;
     int warn_exit = 0;
     const char *db_path = "mancheck.db"; /* default DB path; NULL = disabled */
@@ -175,6 +195,8 @@ main(int argc, char **argv)
 
         if (strcmp(arg, "--json") == 0) {
             json = 1;
+        } else if (strcmp(arg, "--sarif") == 0) {
+            sarif = 1;
         } else if (strcmp(arg, "--gcc") == 0) {
             gcc = 1;
         } else if (strcmp(arg, "--warn-exit") == 0) {
@@ -222,6 +244,13 @@ main(int argc, char **argv)
 
     if (file_count == 0) {
         print_usage(argv[0]);
+        free(files);
+        return 1;
+    }
+
+    if (json && sarif) {
+        fprintf(stderr, "%s: --json and --sarif cannot be used together\n",
+                argv[0]);
         free(files);
         return 1;
     }
@@ -310,7 +339,9 @@ main(int argc, char **argv)
     struct mc_main_ctx ctx = {
         .dbctx       = &dbctx,
         .json_mode   = json,
+        .sarif_mode  = sarif,
         .first_json  = 1,
+        .first_sarif = 1,
         .exit_status = 0,
         .warn_exit   = warn_exit,
         .dump_views  = dump_views
@@ -327,7 +358,7 @@ main(int argc, char **argv)
 
     int exit_status = 0;
 
-    if (!json) {
+    if (!json && !sarif) {
         /* Text mode: exactly as before, but via preproc pipeline */
         int rc = mc_run_preproc_pipeline(metas, file_count, &cfg, &hook);
         if (rc != 0) {
@@ -336,7 +367,7 @@ main(int argc, char **argv)
         } else {
             exit_status = ctx.exit_status;
         }
-    } else {
+    } else if (json) {
         /* JSON mode: wrap files in a single JSON array */
         printf("{\"files\":[\n");
 
@@ -350,6 +381,18 @@ main(int argc, char **argv)
         }
 
         printf("\n]}\n");
+    } else {
+        printf("{\"version\":\"2.1.0\",\"runs\":[{\"tool\":{\"driver\":{\"name\":\"mancheck\"}},\"results\":[\n");
+
+        int rc = mc_run_preproc_pipeline(metas, file_count, &cfg, &hook);
+        if (rc != 0) {
+            fprintf(stderr, "\n/* preprocessing pipeline failed (rc=%d) */\n", rc);
+            exit_status = 1;
+        } else {
+            exit_status = ctx.exit_status;
+        }
+
+        printf("\n]}]}\n");
     }
 
     free(metas);

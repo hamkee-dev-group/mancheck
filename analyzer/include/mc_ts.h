@@ -75,4 +75,11 @@ bool mc_ts_report_file_json_ex(const char *path,
                                const unsigned *line_map,
                                size_t line_map_count);
 
+bool mc_ts_report_file_sarif_ex(const char *path,
+                                const char *pp_source,
+                                size_t pp_source_len,
+                                const unsigned *line_map,
+                                size_t line_map_count,
+                                int *first_result);
+
 #endif /* MC_TS_H */

@@ -1373,6 +1373,13 @@ typedef struct {
     bool first_call;
 } json_state;
 
+typedef struct {
+    mc_finding *items;
+    size_t count;
+    size_t cap;
+    bool failed;
+} sarif_state;
+
 /* Return true if this call info represents an actual diagnostic (i.e.,
  * text_warning_sink would emit a warning for it). */
 static bool is_diagnostic(const mc_ts_file *file, const mc_call_info *info)
@@ -1426,6 +1433,104 @@ static void json_sink(const mc_ts_file *file,
            info->col);
 }
 
+static bool
+mc_sarif_force_collect_failure(size_t next_index)
+{
+    const char *env = getenv("MANCHECK_SARIF_FAIL_AT");
+    char *end = NULL;
+    unsigned long target;
+
+    if (!env || env[0] == '\0')
+        return false;
+
+    target = strtoul(env, &end, 10);
+    if (end == env || *end != '\0' || target == 0)
+        return false;
+
+    return next_index == (size_t)target;
+}
+
+static void
+sarif_collect_sink(const mc_finding *f, void *userdata)
+{
+    sarif_state *st = userdata;
+
+    if (st->failed)
+        return;
+
+    if (mc_sarif_force_collect_failure(st->count + 1)) {
+        st->failed = true;
+        return;
+    }
+
+    if (st->count == st->cap) {
+        size_t new_cap = st->cap ? st->cap * 2 : 8;
+        mc_finding *tmp = realloc(st->items, new_cap * sizeof(*tmp));
+        if (!tmp) {
+            st->failed = true;
+            return;
+        }
+        st->items = tmp;
+        st->cap = new_cap;
+    }
+
+    st->items[st->count++] = *f;
+}
+
+static void
+mc_sarif_emit_result(const mc_finding *f, int *first_result)
+{
+    if (!*first_result)
+        printf(",\n");
+    else
+        *first_result = 0;
+
+    printf("  {\"ruleId\":");
+    mc_json_escape(stdout, f->category);
+    printf(",\"level\":\"warning\",\"message\":{\"text\":");
+    mc_json_escape(stdout, f->message);
+    printf("},\"locations\":[{\"physicalLocation\":{\"artifactLocation\":{\"uri\":");
+    mc_json_escape(stdout, f->file);
+    printf("},\"region\":{\"startLine\":%u,\"startColumn\":%u}}}]}",
+           f->line,
+           f->col);
+}
+
+static bool
+mc_ts_report_file_sarif_impl(mc_ts_file *f, int *first_result)
+{
+    sarif_state st;
+    memset(&st, 0, sizeof st);
+
+    mc_collect_all_findings(f, sarif_collect_sink, &st);
+    if (st.failed) {
+        free(st.items);
+        return false;
+    }
+
+    for (size_t i = 0; i < st.count; i++) {
+        unsigned long long before = mc_report_get_run_issue_count();
+        const mc_finding *finding = &st.items[i];
+
+        if (finding->use_issue_format) {
+            mc_report_issue(finding->file, finding->line, finding->col,
+                            finding->symbol, finding->message, 1);
+        } else {
+            mc_report_fact_kind(finding->file, finding->line, finding->col,
+                                finding->symbol, finding->db_kind,
+                                finding->message, 1);
+        }
+
+        if (mc_report_get_run_issue_count() == before)
+            continue;
+
+        mc_sarif_emit_result(finding, first_result);
+    }
+
+    free(st.items);
+    return true;
+}
+
 bool mc_ts_report_file_json(const char *path) {
     mc_ts_file f;
     if (!mc_ts_file_init(&f, path))
@@ -1441,6 +1546,18 @@ bool mc_ts_report_file_json(const char *path) {
 
     mc_ts_file_destroy(&f);
     return true;
+}
+
+static bool
+mc_ts_report_file_sarif(const char *path, int *first_result)
+{
+    mc_ts_file f;
+    if (!mc_ts_file_init(&f, path))
+        return false;
+
+    bool ok = mc_ts_report_file_sarif_impl(&f, first_result);
+    mc_ts_file_destroy(&f);
+    return ok;
 }
 
 /* --- Extended versions using preprocessed source --------------------- */
@@ -1505,4 +1622,34 @@ bool mc_ts_report_file_json_ex(const char *path,
 
     mc_ts_file_destroy(&f);
     return true;
+}
+
+bool mc_ts_report_file_sarif_ex(const char *path,
+                                const char *pp_source,
+                                size_t pp_source_len,
+                                const unsigned *line_map,
+                                size_t line_map_count,
+                                int *first_result)
+{
+    if (!pp_source || pp_source_len == 0)
+        return mc_ts_report_file_sarif(path, first_result);
+
+    mc_ts_file f;
+    char *src_copy = malloc(pp_source_len + 1);
+    bool ok;
+
+    if (!src_copy)
+        return false;
+    memcpy(src_copy, pp_source, pp_source_len);
+    src_copy[pp_source_len] = '\0';
+
+    if (!mc_ts_file_init_source(&f, path, src_copy, pp_source_len,
+                                line_map, line_map_count)) {
+        free(src_copy);
+        return false;
+    }
+
+    ok = mc_ts_report_file_sarif_impl(&f, first_result);
+    mc_ts_file_destroy(&f);
+    return ok;
 }

@@ -712,6 +712,77 @@ test_inline_suppress() {
 }
 
 # ----------------------------------------------------------------------
+# Test 16a: SARIF output mode
+# ----------------------------------------------------------------------
+test_sarif_output() {
+    log_info "=== Test 16a: SARIF output mode ==="
+
+    local src="mc_tests/tests/test16_dangerous_functions.c"
+    local clean_src="mc_tests/tests/test30_clean_file.c"
+
+    local out
+    out="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --sarif --no-db "$src" 2>/dev/null)" || true
+
+    if echo "$out" | grep -q '^{"version":"2.1.0","runs":\[{"tool":{"driver":{"name":"mancheck"}},"results":\['; then
+        log_pass "SARIF output has expected top-level structure"
+        passed=$((passed+1))
+    else
+        log_fail "SARIF output missing expected top-level structure"
+        failed=$((failed+1))
+    fi
+
+    local result_count
+    result_count="$(echo "$out" | grep -c '"ruleId"' || true)"
+    expect_eq "$result_count" "7" "SARIF output reports all dangerous-function findings"
+
+    if echo "$out" | grep -q '"uri":"mc_tests/tests/test16_dangerous_functions.c"' &&
+       echo "$out" | grep -q 'dangerous function gets()'; then
+        log_pass "SARIF output includes location and message text"
+        passed=$((passed+1))
+    else
+        log_fail "SARIF output missing expected location or message text"
+        failed=$((failed+1))
+    fi
+
+    local rc=0
+    (cd "$ROOT_DIR" && "$ANALYZER_BIN" --warn-exit --sarif --no-db "$src" >/dev/null 2>&1) || rc=$?
+    expect_eq "$rc" "1" "--warn-exit sarif mode: exit 1 when findings reported"
+
+    rc=0
+    (cd "$ROOT_DIR" && "$ANALYZER_BIN" --warn-exit --sarif --no-db "$clean_src" >/dev/null 2>&1) || rc=$?
+    expect_eq "$rc" "0" "--warn-exit sarif mode: exit 0 when no findings"
+
+    rc=0
+    local combo_out
+    combo_out="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --json --sarif --no-db "$src" 2>&1)" || rc=$?
+    expect_eq "$rc" "1" "--json and --sarif cannot be used together"
+
+    if echo "$combo_out" | grep -q -- '--json and --sarif cannot be used together'; then
+        log_pass "incompatible JSON/SARIF flags produce a clear error"
+        passed=$((passed+1))
+    else
+        log_fail "incompatible JSON/SARIF flags missing clear error"
+        failed=$((failed+1))
+    fi
+
+    local fail_db="${OUT_DIR}/sarif_fail.db"
+    rm -f "$fail_db"
+
+    rc=0
+    local fail_out
+    fail_out="$(cd "$ROOT_DIR" && MANCHECK_SARIF_FAIL_AT=1 "$ANALYZER_BIN" --sarif --db "$fail_db" "$src" 2>&1)" || rc=$?
+    expect_eq "$rc" "1" "SARIF collector failure exits non-zero"
+
+    local fail_result_count
+    fail_result_count="$(echo "$fail_out" | grep -c '"ruleId"' || true)"
+    expect_eq "$fail_result_count" "0" "SARIF collector failure emits no partial results"
+
+    local fail_db_count
+    fail_db_count="$(sqlite3 "$fail_db" "SELECT error_count FROM runs ORDER BY rowid DESC LIMIT 1;" 2>/dev/null || echo "")"
+    expect_eq "$fail_db_count" "1" "SARIF collector failure marks DB run as non-success"
+}
+
+# ----------------------------------------------------------------------
 # Test 16: --warn-exit flag
 # ----------------------------------------------------------------------
 test_warn_exit() {
@@ -817,6 +888,7 @@ main() {
     test_gcc_format_double_close
     test_suppressions
     test_inline_suppress
+    test_sarif_output
     test_warn_exit
     test_finding_pipeline_extra_checks
 
