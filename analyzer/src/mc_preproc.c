@@ -839,8 +839,21 @@ int mc_run_preproc_pipeline(const mc_file_meta *files,
 
         (void)mc_preprocess_minimal(&v);
 
-        /* best-effort: ignore rc; src_pp may be NULL */
         (void)mc_preprocess_clang(&v, pp_cfg);
+
+        /* If the file had a compile-DB entry, preprocessing must succeed;
+         * a silent fallback to raw source hides compile_commands regressions. */
+        if (v.src_pp == NULL &&
+            (v.meta.compile_cmd || v.meta.compile_argc > 0))
+        {
+            fprintf(stderr,
+                    "error: preprocessing failed for %s "
+                    "(matched compilation database entry)\n",
+                    files[i].abs_path ? files[i].abs_path : files[i].path);
+            mc_free_source_views(&v);
+            return -1;
+        }
+
         (void)mc_preprocess_pp_trim_user(&v);
 
         if (hook && hook->on_views)

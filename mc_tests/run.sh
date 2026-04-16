@@ -1298,7 +1298,30 @@ test_analyzer_compile_commands_integration() {
 }
 
 # ----------------------------------------------------------------------
-# Test 22: CLI error-path integration tests
+# Test 22: Bad compile_commands entry fails loudly
+# ----------------------------------------------------------------------
+test_bad_compdb_fails() {
+    log_info "=== Test 22: bad compile_commands entry fails loudly ==="
+
+    local compdb="${ROOT_DIR}/mc_tests/fixtures/bad_compdb/compile_commands.json"
+    local src="mc_tests/fixtures/bad_compdb/bad_compdb.c"
+
+    local rc=0 out
+    out="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --no-db --compile-commands "$compdb" "$src" 2>&1)" || rc=$?
+
+    expect_eq "$rc" "1" "bad compdb: exits non-zero"
+
+    if echo "$out" | grep -q 'preprocessing failed.*matched compilation database entry'; then
+        log_pass "bad compdb: error message present"
+        passed=$((passed+1))
+    else
+        log_fail "bad compdb: error message present (got: $out)"
+        failed=$((failed+1))
+    fi
+}
+
+# ----------------------------------------------------------------------
+# Test 23: CLI error-path integration tests
 # ----------------------------------------------------------------------
 test_cli_error_paths() {
     log_info "=== Test 22: CLI error-path integration tests ==="
@@ -1431,6 +1454,7 @@ main() {
     test_db_extra_check_facts
     test_preprocess_compile_cmd_std
     test_analyzer_compile_commands_integration
+    test_bad_compdb_fails
     test_cli_error_paths
     test_gcc_stream_split
 

@@ -1,0 +1,12 @@
+[
+  {
+    "directory": ".",
+    "file": "bad_compdb.c",
+    "arguments": [
+      "clang",
+      "-c",
+      "-std=invalid_mancheck_test_std",
+      "bad_compdb.c"
+    ]
+  }
+]
