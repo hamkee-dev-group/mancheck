@@ -899,6 +899,55 @@ test_json_issue_count() {
     expect_eq "$ic_mb" "6" "JSON issue_count for malloc_bad.c matches text-mode total"
 }
 
+# Test 18b: JSON diagnostics array includes extra-check findings
+# ----------------------------------------------------------------------
+test_json_diagnostics() {
+    log_info "=== Test 18b: JSON diagnostics array for extra-check findings ==="
+
+    # env_usage.c: 4 insecure_env_usage findings should appear in diagnostics
+    local json_env
+    json_env="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --json --no-db mc_tests/tests/env_usage.c 2>/dev/null)" || true
+
+    if echo "$json_env" | grep -q '"diagnostics"'; then
+        log_pass "JSON output contains diagnostics array"
+        passed=$((passed+1))
+    else
+        log_fail "JSON output missing diagnostics array"
+        failed=$((failed+1))
+    fi
+
+    local diag_env_count
+    diag_env_count="$(echo "$json_env" | grep -o '"category":"insecure_env_usage"' | wc -l)"
+    expect_eq "$diag_env_count" "4" "JSON diagnostics: 4 insecure_env_usage for env_usage.c"
+
+    # double_close.c: 2 double_close findings in diagnostics
+    local json_dc
+    json_dc="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --json --no-db mc_tests/tests/double_close.c 2>/dev/null)" || true
+
+    local diag_dc_count
+    diag_dc_count="$(echo "$json_dc" | grep -o '"category":"double_close"' | wc -l)"
+    expect_eq "$diag_dc_count" "2" "JSON diagnostics: 2 double_close for double_close.c"
+
+    # malloc_bad.c: 2 malloc_size_mismatch findings in diagnostics
+    local json_mb
+    json_mb="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --json --no-db mc_tests/tests/malloc_bad.c 2>/dev/null)" || true
+
+    local diag_mb_count
+    diag_mb_count="$(echo "$json_mb" | grep -o '"category":"malloc_size_mismatch"' | wc -l)"
+    expect_eq "$diag_mb_count" "2" "JSON diagnostics: 2 malloc_size_mismatch for malloc_bad.c"
+
+    # diagnostics entries have line and category fields
+    local diag_line_count
+    diag_line_count="$(echo "$json_env" | grep -c '"line":' || true)"
+    if [ "$diag_line_count" -gt 0 ]; then
+        log_pass "diagnostics entries contain line field"
+        passed=$((passed+1))
+    else
+        log_fail "diagnostics entries missing line field"
+        failed=$((failed+1))
+    fi
+}
+
 # ----------------------------------------------------------------------
 # Test 19: DB assertions for non-call findings and suppression effects
 # ----------------------------------------------------------------------
@@ -1156,6 +1205,7 @@ main() {
     test_warn_exit
     test_finding_pipeline_extra_checks
     test_json_issue_count
+    test_json_diagnostics
     test_db_extra_check_facts
     test_preprocess_compile_cmd_std
     test_cli_error_paths
