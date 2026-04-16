@@ -124,21 +124,40 @@ void mc_suppress_free(void)
 
 /* --- inline (comment-based) suppression ------------------------------ */
 
-static unsigned *g_inline_lines;
-static size_t    g_inline_count;
-static size_t    g_inline_cap;
+static unsigned *g_inline_same_line;
+static size_t    g_inline_same_count;
+static size_t    g_inline_same_cap;
+static unsigned *g_inline_next_diag;
+static size_t    g_inline_next_count;
+static size_t    g_inline_next_cap;
+static size_t    g_inline_next_pos;
 
-static void inline_add(unsigned line)
+static void inline_add(unsigned **items,
+                       size_t *count,
+                       size_t *cap,
+                       unsigned line)
 {
-    if (g_inline_count == g_inline_cap) {
-        size_t newcap = g_inline_cap ? g_inline_cap * 2 : 16;
-        unsigned *tmp = realloc(g_inline_lines, newcap * sizeof(*tmp));
+    if (*count == *cap) {
+        size_t newcap = *cap ? *cap * 2 : 16;
+        unsigned *tmp = realloc(*items, newcap * sizeof(*tmp));
         if (!tmp)
             return;
-        g_inline_lines = tmp;
-        g_inline_cap = newcap;
+        *items = tmp;
+        *cap = newcap;
     }
-    g_inline_lines[g_inline_count++] = line;
+    (*items)[(*count)++] = line;
+}
+
+static void inline_add_same_line(unsigned line)
+{
+    inline_add(&g_inline_same_line, &g_inline_same_count, &g_inline_same_cap,
+               line);
+}
+
+static void inline_add_next_diag(unsigned line)
+{
+    inline_add(&g_inline_next_diag, &g_inline_next_count, &g_inline_next_cap,
+               line);
 }
 
 /* Check if the comment body (after //) starts with a suppression marker,
@@ -232,9 +251,9 @@ void mc_inline_suppress_scan(const char *src_raw)
                     eol++;
                 if (has_marker(p + 1, eol)) {
                     if (is_comment_only(line_start, comment_start))
-                        inline_add(lineno + 1);
+                        inline_add_next_diag(lineno);
                     else
-                        inline_add(lineno);
+                        inline_add_same_line(lineno);
                 }
             } else if (c == '*') {
                 state = ST_BLOCK_COMMENT;
@@ -272,17 +291,32 @@ void mc_inline_suppress_scan(const char *src_raw)
 
 int mc_inline_suppress_check(unsigned line)
 {
-    for (size_t i = 0; i < g_inline_count; i++) {
-        if (g_inline_lines[i] == line)
+    int suppressed = 0;
+
+    while (g_inline_next_pos < g_inline_next_count &&
+           g_inline_next_diag[g_inline_next_pos] < line) {
+        g_inline_next_pos++;
+        suppressed = 1;
+    }
+
+    for (size_t i = 0; i < g_inline_same_count; i++) {
+        if (g_inline_same_line[i] == line)
             return 1;
     }
-    return 0;
+
+    return suppressed;
 }
 
 void mc_inline_suppress_clear(void)
 {
-    free(g_inline_lines);
-    g_inline_lines = NULL;
-    g_inline_count = 0;
-    g_inline_cap   = 0;
+    free(g_inline_same_line);
+    g_inline_same_line = NULL;
+    g_inline_same_count = 0;
+    g_inline_same_cap   = 0;
+
+    free(g_inline_next_diag);
+    g_inline_next_diag = NULL;
+    g_inline_next_count = 0;
+    g_inline_next_cap   = 0;
+    g_inline_next_pos   = 0;
 }

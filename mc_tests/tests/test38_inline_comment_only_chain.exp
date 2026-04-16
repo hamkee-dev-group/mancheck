@@ -1,0 +1,1 @@
+tests/test38_inline_comment_only_chain.c:11:5: warning: use of dangerous function gets()

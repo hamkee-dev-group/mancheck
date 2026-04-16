@@ -828,6 +828,60 @@ test_inline_suppress() {
 }
 
 # ----------------------------------------------------------------------
+# Test 15b: Comment-only inline suppressions are consumed per diagnostic
+# ----------------------------------------------------------------------
+test_inline_suppress_comment_only_chain() {
+    log_info "=== Test 15b: comment-only inline suppressions bind once ==="
+
+    local src="mc_tests/tests/test38_inline_comment_only_chain.c"
+    local out
+    out="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --no-db "$src" 2>&1)" || true
+
+    local count
+    count="$(echo "$out" | grep -c ':' || true)"
+    expect_eq "$count" "1" "comment-only inline suppress: later diagnostic still reports"
+
+    if echo "$out" | grep -q 'test38_inline_comment_only_chain\.c:9:'; then
+        log_fail "comment-only inline suppress: repeated markers leaked past first diagnostic"
+        failed=$((failed+1))
+    else
+        log_pass "comment-only inline suppress: repeated markers consumed by first diagnostic"
+        passed=$((passed+1))
+    fi
+
+    if echo "$out" | grep -q 'test38_inline_comment_only_chain\.c:11:.*gets()'; then
+        log_pass "comment-only inline suppress: later diagnostic reports"
+        passed=$((passed+1))
+    else
+        log_fail "comment-only inline suppress: later diagnostic missing"
+        failed=$((failed+1))
+    fi
+
+    local out_json
+    out_json="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --json --no-db "$src" 2>/dev/null)" || true
+
+    if echo "$out_json" | grep -q '"line":9'; then
+        log_fail "comment-only inline suppress JSON: suppressed diagnostic still present"
+        failed=$((failed+1))
+    else
+        log_pass "comment-only inline suppress JSON: first diagnostic suppressed"
+        passed=$((passed+1))
+    fi
+
+    if echo "$out_json" | grep -q '"line":11'; then
+        log_pass "comment-only inline suppress JSON: later diagnostic preserved"
+        passed=$((passed+1))
+    else
+        log_fail "comment-only inline suppress JSON: later diagnostic missing"
+        failed=$((failed+1))
+    fi
+
+    local json_issue_count
+    json_issue_count="$(echo "$out_json" | grep -o '"issue_count":[0-9]*' | head -n1 | cut -d: -f2)"
+    expect_eq "$json_issue_count" "1" "comment-only inline suppress JSON: issue_count is 1"
+}
+
+# ----------------------------------------------------------------------
 # Test 16a: SARIF output mode
 # ----------------------------------------------------------------------
 test_sarif_output() {
@@ -1445,6 +1499,7 @@ main() {
     test_gcc_format_double_close
     test_suppressions
     test_inline_suppress
+    test_inline_suppress_comment_only_chain
     test_sarif_output
     test_warn_exit
     test_gcc_sarif_default_exit
