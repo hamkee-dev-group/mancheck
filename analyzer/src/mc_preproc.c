@@ -5,6 +5,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 static char *
 mc_read_entire_file(const char *path)
@@ -201,19 +204,102 @@ int mc_preprocess_minimal(mc_source_views *views)
     return 0;
 }
 
-static char *
-mc_capture_command_output(const char *cmd)
+typedef struct {
+    char **argv;
+    size_t argc;
+    size_t cap;
+} mc_argv_builder;
+
+static void
+mc_argv_builder_free(mc_argv_builder *builder)
 {
-    FILE *p = popen(cmd, "r");
-    if (!p)
+    if (!builder)
+        return;
+
+    for (size_t i = 0; i < builder->argc; i++)
+        free(builder->argv[i]);
+    free(builder->argv);
+
+    builder->argv = NULL;
+    builder->argc = 0;
+    builder->cap = 0;
+}
+
+static int
+mc_argv_builder_push(mc_argv_builder *builder, const char *arg)
+{
+    if (!builder || !arg)
+        return -1;
+
+    if (builder->argc + 2 > builder->cap)
+    {
+        size_t new_cap = builder->cap ? builder->cap * 2 : 8;
+        while (builder->argc + 2 > new_cap)
+            new_cap *= 2;
+
+        char **tmp = realloc(builder->argv, new_cap * sizeof(*tmp));
+        if (!tmp)
+            return -1;
+
+        builder->argv = tmp;
+        builder->cap = new_cap;
+    }
+
+    builder->argv[builder->argc] = strdup(arg);
+    if (!builder->argv[builder->argc])
+        return -1;
+
+    builder->argc++;
+    builder->argv[builder->argc] = NULL;
+    return 0;
+}
+
+static char *
+mc_capture_argv_output(char *const argv[])
+{
+    int pipefd[2];
+    if (pipe(pipefd) != 0)
         return NULL;
+
+    pid_t pid = fork();
+    if (pid < 0)
+    {
+        (void)close(pipefd[0]);
+        (void)close(pipefd[1]);
+        return NULL;
+    }
+
+    if (pid == 0)
+    {
+        int devnull = open("/dev/null", O_WRONLY);
+
+        (void)close(pipefd[0]);
+
+        if (dup2(pipefd[1], STDOUT_FILENO) < 0)
+            _exit(127);
+        (void)close(pipefd[1]);
+
+        if (devnull >= 0)
+        {
+            if (dup2(devnull, STDERR_FILENO) < 0)
+                _exit(127);
+            if (devnull != STDERR_FILENO)
+                (void)close(devnull);
+        }
+
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+
+    (void)close(pipefd[1]);
 
     size_t cap = 4096;
     size_t len = 0;
     char *buf = malloc(cap);
     if (!buf)
     {
-        (void)pclose(p);
+        (void)close(pipefd[0]);
+        (void)waitpid(pid, NULL, 0);
         return NULL;
     }
 
@@ -222,34 +308,41 @@ mc_capture_command_output(const char *cmd)
         if (len + 1024 > cap)
         {
             size_t new_cap = cap * 2;
-            char *nb = realloc(buf, new_cap);
-            if (!nb)
+            char *tmp = realloc(buf, new_cap);
+            if (!tmp)
             {
                 free(buf);
-                (void)pclose(p);
+                (void)close(pipefd[0]);
+                (void)waitpid(pid, NULL, 0);
                 return NULL;
             }
-            buf = nb;
+            buf = tmp;
             cap = new_cap;
         }
 
-        size_t n = fread(buf + len, 1, 1024, p);
-        len += n;
-
-        if (n < 1024)
+        ssize_t n = read(pipefd[0], buf + len, 1024);
+        if (n > 0)
         {
-            if (feof(p))
-                break;
-            if (ferror(p))
-            {
-                free(buf);
-                (void)pclose(p);
-                return NULL;
-            }
+            len += (size_t)n;
+            continue;
         }
+        if (n == 0)
+            break;
+        if (errno == EINTR)
+            continue;
+
+        free(buf);
+        (void)close(pipefd[0]);
+        (void)waitpid(pid, NULL, 0);
+        return NULL;
     }
 
-    (void)pclose(p);
+    (void)close(pipefd[0]);
+    while (waitpid(pid, NULL, 0) < 0)
+    {
+        if (errno != EINTR)
+            break;
+    }
 
     if (len == 0)
     {
@@ -259,13 +352,13 @@ mc_capture_command_output(const char *cmd)
 
     if (len == cap)
     {
-        char *nb = realloc(buf, cap + 1);
-        if (!nb)
+        char *tmp = realloc(buf, cap + 1);
+        if (!tmp)
         {
             free(buf);
             return NULL;
         }
-        buf = nb;
+        buf = tmp;
     }
 
     buf[len] = '\0';
@@ -327,18 +420,72 @@ mc_next_shell_token(const char *p, char *buf, size_t buf_size)
     return p;
 }
 
-static char *
-mc_extract_compile_std(const char *compile_cmd)
+static int
+mc_append_tokenized_flags(mc_argv_builder *builder, const char *flags)
 {
-    if (!compile_cmd)
-        return NULL;
+    if (!flags || flags[0] == '\0')
+        return 0;
+
+    size_t tok_cap = strlen(flags) + 1;
+    char *tok = malloc(tok_cap);
+    if (!tok)
+        return -1;
+
+    int rc = 0;
+    const char *p = flags;
+
+    for (;;)
+    {
+        p = mc_next_shell_token(p, tok, tok_cap);
+        if (!p)
+            break;
+
+        if (mc_argv_builder_push(builder, tok) != 0)
+        {
+            rc = -1;
+            break;
+        }
+    }
+
+    free(tok);
+    return rc;
+}
+
+static int
+mc_compile_cmd_flag_has_value(const char *tok)
+{
+    return strcmp(tok, "-std") == 0 ||
+           strcmp(tok, "-D") == 0 ||
+           strcmp(tok, "-U") == 0 ||
+           strcmp(tok, "-I") == 0;
+}
+
+static int
+mc_compile_cmd_flag_is_inline(const char *tok)
+{
+    return (strncmp(tok, "-std=", 5) == 0 && tok[5] != '\0') ||
+           (strncmp(tok, "-D", 2) == 0 && tok[2] != '\0') ||
+           (strncmp(tok, "-U", 2) == 0 && tok[2] != '\0') ||
+           (strncmp(tok, "-I", 2) == 0 && tok[2] != '\0');
+}
+
+static int
+mc_append_compile_cmd_flags(mc_argv_builder *builder, const char *compile_cmd)
+{
+    if (!compile_cmd || compile_cmd[0] == '\0')
+        return 0;
 
     size_t tok_cap = strlen(compile_cmd) + 1;
     char *tok = malloc(tok_cap);
-    if (!tok)
-        return NULL;
+    char *next = malloc(tok_cap);
+    if (!tok || !next)
+    {
+        free(tok);
+        free(next);
+        return -1;
+    }
 
-    char *std = NULL;
+    int rc = 0;
     const char *p = compile_cmd;
 
     for (;;)
@@ -347,30 +494,57 @@ mc_extract_compile_std(const char *compile_cmd)
         if (!p)
             break;
 
-        if (strncmp(tok, "-std=", 5) == 0 && tok[5] != '\0')
+        if (mc_compile_cmd_flag_is_inline(tok))
         {
-            free(std);
-            std = strdup(tok + 5);
-            if (!std)
+            if (mc_argv_builder_push(builder, tok) != 0)
+            {
+                rc = -1;
                 break;
+            }
             continue;
         }
 
-        if (strcmp(tok, "-std") == 0)
+        if (mc_compile_cmd_flag_has_value(tok))
         {
-            p = mc_next_shell_token(p, tok, tok_cap);
-            if (!p || tok[0] == '\0')
+            const char *np = mc_next_shell_token(p, next, tok_cap);
+            if (!np || next[0] == '\0')
+            {
+                rc = -1;
                 break;
+            }
 
-            free(std);
-            std = strdup(tok);
-            if (!std)
-                break;
+            if (strcmp(tok, "-std") == 0)
+            {
+                size_t len = strlen(next) + strlen("-std=") + 1;
+                char *joined = malloc(len);
+                if (!joined)
+                {
+                    rc = -1;
+                    break;
+                }
+                (void)snprintf(joined, len, "-std=%s", next);
+                if (mc_argv_builder_push(builder, joined) != 0)
+                    rc = -1;
+                free(joined);
+                if (rc != 0)
+                    break;
+            }
+            else
+            {
+                if (mc_argv_builder_push(builder, tok) != 0 ||
+                    mc_argv_builder_push(builder, next) != 0)
+                {
+                    rc = -1;
+                    break;
+                }
+            }
+            p = np;
         }
     }
 
     free(tok);
-    return std;
+    free(next);
+    return rc;
 }
 
 /* Best-effort clang -E:
@@ -386,38 +560,20 @@ int mc_preprocess_clang(mc_source_views *views,
     const char *clang = (cfg && cfg->clang_path) ? cfg->clang_path : "clang";
     const char *extra = (cfg && cfg->extra_flags) ? cfg->extra_flags : "";
     const char *path = views->meta.abs_path;
-    char *compile_std = mc_extract_compile_std(views->meta.compile_cmd);
+    mc_argv_builder argv = {0};
 
-    /* Add " 2>/dev/null" to silence clang diagnostics */
-    const char *redir = " 2>/dev/null";
-
-    size_t len = strlen(clang) + 4 + strlen(path) + strlen(redir) + 1;
-    if (extra[0] != '\0')
-        len += strlen(extra) + 1;
-    if (compile_std)
-        len += 6 + strlen(compile_std);
-
-    char *cmd = malloc(len);
-    if (!cmd)
+    if (mc_argv_builder_push(&argv, clang) != 0 ||
+        mc_argv_builder_push(&argv, "-E") != 0 ||
+        mc_append_tokenized_flags(&argv, extra) != 0 ||
+        mc_append_compile_cmd_flags(&argv, views->meta.compile_cmd) != 0 ||
+        mc_argv_builder_push(&argv, path) != 0)
     {
-        free(compile_std);
+        mc_argv_builder_free(&argv);
         return -1;
     }
 
-    if (extra[0] != '\0' && compile_std)
-        (void)snprintf(cmd, len, "%s -E %s -std=%s %s%s",
-                       clang, extra, compile_std, path, redir);
-    else if (extra[0] != '\0')
-        (void)snprintf(cmd, len, "%s -E %s %s%s", clang, extra, path, redir);
-    else if (compile_std)
-        (void)snprintf(cmd, len, "%s -E -std=%s %s%s",
-                       clang, compile_std, path, redir);
-    else
-        (void)snprintf(cmd, len, "%s -E %s%s", clang, path, redir);
-
-    char *out = mc_capture_command_output(cmd);
-    free(cmd);
-    free(compile_std);
+    char *out = mc_capture_argv_output(argv.argv);
+    mc_argv_builder_free(&argv);
 
     if (!out)
     {

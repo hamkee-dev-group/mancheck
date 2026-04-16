@@ -900,14 +900,16 @@ test_json_issue_count() {
 }
 
 # ----------------------------------------------------------------------
-# Test 19: mc_preprocess_clang honors compile_cmd -std
+# Test 19: mc_preprocess_clang honors compile_cmd preprocessing flags
 # ----------------------------------------------------------------------
 test_preprocess_compile_cmd_std() {
-    log_info "=== Test 19: mc_preprocess_clang compile_cmd -std ==="
+    log_info "=== Test 19: mc_preprocess_clang compile_cmd flags ==="
 
     local helper_src="${ROOT_DIR}/mc_tests/helpers/preproc_std_helper.c"
     local helper_bin="${OUT_DIR}/preproc_std_helper"
-    local fixture="${ROOT_DIR}/mc_tests/fixtures/preproc_std_fixture.c"
+    local std_fixture="${ROOT_DIR}/mc_tests/fixtures/preproc_std_fixture.c"
+    local compdb_fixture="${ROOT_DIR}/mc_tests/fixtures/preproc_compdb_fixture.c"
+    local include_dir="${ROOT_DIR}/mc_tests/fixtures/preproc_compdb_include"
 
     rm -f "$helper_bin"
 
@@ -917,11 +919,11 @@ test_preprocess_compile_cmd_std() {
         "$helper_src" \
         "${ROOT_DIR}/analyzer/src/mc_preproc.c"
 
-    if run_cmd "$helper_bin" "$fixture"; then
-        log_pass "compile_cmd -std overrides fallback and preserves fallback cases"
+    if run_cmd "$helper_bin" "$std_fixture" "$compdb_fixture" "$include_dir"; then
+        log_pass "compile_cmd flags provide -std, -D, and -I without shell interpolation"
         passed=$((passed+1))
     else
-        log_fail "compile_cmd -std regression"
+        log_fail "compile_cmd preprocessing regression"
         failed=$((failed+1))
     fi
 }
