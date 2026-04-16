@@ -900,10 +900,121 @@ test_json_issue_count() {
 }
 
 # ----------------------------------------------------------------------
-# Test 19: mc_preprocess_clang honors compile_cmd preprocessing flags
+# Test 19: DB assertions for non-call findings and suppression effects
+# ----------------------------------------------------------------------
+test_db_extra_check_facts() {
+    log_info "=== Test 19: DB facts for extra-check findings ==="
+
+    local db="${ROOT_DIR}/mc_tests/extra_facts_test.db"
+    rm -f "$db"
+
+    # --- env_usage.c: 4 insecure_env_usage + 1 retval_unchecked = 5 ---
+    (cd "$ROOT_DIR" && "$ANALYZER_BIN" --db "$db" mc_tests/tests/env_usage.c >/dev/null 2>&1) || true
+
+    local run_id_env
+    run_id_env="$(sqlite3 "$db" "SELECT id FROM runs WHERE filename LIKE '%env_usage.c%' LIMIT 1;")"
+
+    local ec_env
+    ec_env="$(sqlite3 "$db" "SELECT error_count FROM runs WHERE id=$run_id_env;")"
+    expect_eq "$ec_env" "5" "env_usage.c: error_count=5"
+
+    local env_facts
+    env_facts="$(sqlite3 "$db" "SELECT COUNT(*) FROM facts WHERE run_id=$run_id_env AND kind='insecure_env_usage';")"
+    expect_eq "$env_facts" "4" "env_usage.c: 4 insecure_env_usage facts"
+
+    local env_retval
+    env_retval="$(sqlite3 "$db" "SELECT COUNT(*) FROM facts WHERE run_id=$run_id_env AND kind='retval_unchecked';")"
+    expect_eq "$env_retval" "1" "env_usage.c: 1 retval_unchecked fact"
+
+    # --- malloc_bad.c: 2 malloc_size_mismatch + 4 retval_unchecked = 6 ---
+    (cd "$ROOT_DIR" && "$ANALYZER_BIN" --db "$db" mc_tests/tests/malloc_bad.c >/dev/null 2>&1) || true
+
+    local run_id_mb
+    run_id_mb="$(sqlite3 "$db" "SELECT id FROM runs WHERE filename LIKE '%malloc_bad.c%' LIMIT 1;")"
+
+    local ec_mb
+    ec_mb="$(sqlite3 "$db" "SELECT error_count FROM runs WHERE id=$run_id_mb;")"
+    expect_eq "$ec_mb" "6" "malloc_bad.c: error_count=6"
+
+    local mb_facts
+    mb_facts="$(sqlite3 "$db" "SELECT COUNT(*) FROM facts WHERE run_id=$run_id_mb AND kind='malloc_size_mismatch';")"
+    expect_eq "$mb_facts" "2" "malloc_bad.c: 2 malloc_size_mismatch facts"
+
+    local mb_retval
+    mb_retval="$(sqlite3 "$db" "SELECT COUNT(*) FROM facts WHERE run_id=$run_id_mb AND kind='return_value_check';")"
+    expect_eq "$mb_retval" "4" "malloc_bad.c: 4 return_value_check facts"
+
+    # --- double_close.c: 2 double_close + 2 retval_unchecked = 4 ---
+    (cd "$ROOT_DIR" && "$ANALYZER_BIN" --db "$db" mc_tests/tests/double_close.c >/dev/null 2>&1) || true
+
+    local run_id_dc
+    run_id_dc="$(sqlite3 "$db" "SELECT id FROM runs WHERE filename LIKE '%double_close.c%' LIMIT 1;")"
+
+    local ec_dc
+    ec_dc="$(sqlite3 "$db" "SELECT error_count FROM runs WHERE id=$run_id_dc;")"
+    expect_eq "$ec_dc" "4" "double_close.c: error_count=4"
+
+    local dc_facts
+    dc_facts="$(sqlite3 "$db" "SELECT COUNT(*) FROM facts WHERE run_id=$run_id_dc AND kind='double_close';")"
+    expect_eq "$dc_facts" "2" "double_close.c: 2 double_close facts"
+
+    local dc_retval
+    dc_retval="$(sqlite3 "$db" "SELECT COUNT(*) FROM facts WHERE run_id=$run_id_dc AND kind='retval_unchecked';")"
+    expect_eq "$dc_retval" "2" "double_close.c: 2 retval_unchecked facts"
+
+    # --- Suppression: insecure_env_usage suppressed for env_usage.c ---
+    local sdb="${ROOT_DIR}/mc_tests/extra_facts_sup.db"
+    rm -f "$sdb"
+
+    (cd "$ROOT_DIR" && "$ANALYZER_BIN" --db "$sdb" --suppressions mc_tests/tests/env_usage.sup mc_tests/tests/env_usage.c >/dev/null 2>&1) || true
+
+    local sid_env
+    sid_env="$(sqlite3 "$sdb" "SELECT id FROM runs WHERE filename LIKE '%env_usage.c%' LIMIT 1;")"
+
+    local sec_env
+    sec_env="$(sqlite3 "$sdb" "SELECT error_count FROM runs WHERE id=$sid_env;")"
+    expect_eq "$sec_env" "1" "suppressed env_usage.c: error_count=1 (only retval)"
+
+    local senv_facts
+    senv_facts="$(sqlite3 "$sdb" "SELECT COUNT(*) FROM facts WHERE run_id=$sid_env AND kind='insecure_env_usage';")"
+    expect_eq "$senv_facts" "0" "suppressed env_usage.c: 0 insecure_env_usage facts"
+
+    # --- Suppression: malloc_size_mismatch suppressed for malloc_bad.c ---
+    (cd "$ROOT_DIR" && "$ANALYZER_BIN" --db "$sdb" --suppressions mc_tests/tests/malloc_bad.sup mc_tests/tests/malloc_bad.c >/dev/null 2>&1) || true
+
+    local sid_mb
+    sid_mb="$(sqlite3 "$sdb" "SELECT id FROM runs WHERE filename LIKE '%malloc_bad.c%' LIMIT 1;")"
+
+    local sec_mb
+    sec_mb="$(sqlite3 "$sdb" "SELECT error_count FROM runs WHERE id=$sid_mb;")"
+    expect_eq "$sec_mb" "4" "suppressed malloc_bad.c: error_count=4 (only retval)"
+
+    local smb_facts
+    smb_facts="$(sqlite3 "$sdb" "SELECT COUNT(*) FROM facts WHERE run_id=$sid_mb AND kind='malloc_size_mismatch';")"
+    expect_eq "$smb_facts" "0" "suppressed malloc_bad.c: 0 malloc_size_mismatch facts"
+
+    # --- Suppression: double_close suppressed for double_close.c ---
+    (cd "$ROOT_DIR" && "$ANALYZER_BIN" --db "$sdb" --suppressions mc_tests/tests/double_close.sup mc_tests/tests/double_close.c >/dev/null 2>&1) || true
+
+    local sid_dc
+    sid_dc="$(sqlite3 "$sdb" "SELECT id FROM runs WHERE filename LIKE '%double_close.c%' LIMIT 1;")"
+
+    local sec_dc
+    sec_dc="$(sqlite3 "$sdb" "SELECT error_count FROM runs WHERE id=$sid_dc;")"
+    expect_eq "$sec_dc" "2" "suppressed double_close.c: error_count=2 (only retval)"
+
+    local sdc_facts
+    sdc_facts="$(sqlite3 "$sdb" "SELECT COUNT(*) FROM facts WHERE run_id=$sid_dc AND kind='double_close';")"
+    expect_eq "$sdc_facts" "0" "suppressed double_close.c: 0 double_close facts"
+
+    rm -f "$db" "$sdb"
+}
+
+# ----------------------------------------------------------------------
+# Test 20: mc_preprocess_clang honors compile_cmd preprocessing flags
 # ----------------------------------------------------------------------
 test_preprocess_compile_cmd_std() {
-    log_info "=== Test 19: mc_preprocess_clang compile_cmd flags ==="
+    log_info "=== Test 20: mc_preprocess_clang compile_cmd flags ==="
 
     local helper_src="${ROOT_DIR}/mc_tests/helpers/preproc_std_helper.c"
     local helper_bin="${OUT_DIR}/preproc_std_helper"
@@ -951,6 +1062,7 @@ main() {
     test_warn_exit
     test_finding_pipeline_extra_checks
     test_json_issue_count
+    test_db_extra_check_facts
     test_preprocess_compile_cmd_std
 
     echo
