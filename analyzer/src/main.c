@@ -54,6 +54,7 @@ struct mc_main_ctx {
     mc_db_ctx *dbctx;
     int json_mode;       /* 0 = text, 1 = JSON */
     int sarif_mode;      /* 0 = off, 1 = SARIF */
+    int gcc_mode;        /* 0 = off, 1 = GCC diagnostic format */
     int first_json;      /* for printing commas between JSON files */
     int first_sarif;     /* for printing commas between SARIF results */
     int exit_status;     /* 0 if all good, 1 if any file failed */
@@ -121,7 +122,7 @@ main_on_views(struct mc_preproc_hook *hook,
         }
 
         int error_count = (int)mc_report_get_run_issue_count();
-        if (error_count > 0 && ctx->warn_exit)
+        if (error_count > 0 && (ctx->warn_exit || ctx->gcc_mode))
             ctx->exit_status = 1;
         mc_db_run_end(ctx->dbctx, &dbrun, error_count);
     } else if (ctx->json_mode) {
@@ -156,7 +157,7 @@ main_on_views(struct mc_preproc_hook *hook,
         }
 
         int error_count = (int)mc_report_get_run_issue_count();
-        if (error_count > 0 && ctx->warn_exit)
+        if (error_count > 0)
             ctx->exit_status = 1;
         mc_db_run_end(ctx->dbctx, &dbrun, error_count);
     }
@@ -340,6 +341,7 @@ main(int argc, char **argv)
         .dbctx       = &dbctx,
         .json_mode   = json,
         .sarif_mode  = sarif,
+        .gcc_mode    = gcc,
         .first_json  = 1,
         .first_sarif = 1,
         .exit_status = 0,

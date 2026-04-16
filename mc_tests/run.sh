@@ -830,6 +830,43 @@ test_warn_exit() {
 }
 
 # ----------------------------------------------------------------------
+# Test 16b: GCC and SARIF modes exit 1 on findings by default
+# ----------------------------------------------------------------------
+test_gcc_sarif_default_exit() {
+    log_info "=== Test 16b: GCC/SARIF default exit on findings ==="
+
+    # Plain text without --warn-exit: findings → exit 0 (legacy)
+    local rc=0
+    (cd "$ROOT_DIR" && "$ANALYZER_BIN" --no-db mc_tests/tests/test16_dangerous_functions.c >/dev/null 2>&1) || rc=$?
+    expect_eq "$rc" "0" "plain text: exit 0 despite findings (legacy)"
+
+    # JSON without --warn-exit: findings → exit 0 (legacy)
+    rc=0
+    (cd "$ROOT_DIR" && "$ANALYZER_BIN" --json --no-db mc_tests/tests/test16_dangerous_functions.c >/dev/null 2>&1) || rc=$?
+    expect_eq "$rc" "0" "json: exit 0 despite findings (legacy)"
+
+    # GCC mode without --warn-exit: findings → exit 1
+    rc=0
+    (cd "$ROOT_DIR" && "$ANALYZER_BIN" --gcc --no-db mc_tests/tests/test16_dangerous_functions.c >/dev/null 2>&1) || rc=$?
+    expect_eq "$rc" "1" "gcc mode: exit 1 on findings by default"
+
+    # GCC mode: clean file → exit 0
+    rc=0
+    (cd "$ROOT_DIR" && "$ANALYZER_BIN" --gcc --no-db mc_tests/tests/test30_clean_file.c >/dev/null 2>&1) || rc=$?
+    expect_eq "$rc" "0" "gcc mode: exit 0 on clean file"
+
+    # SARIF mode without --warn-exit: findings → exit 1
+    rc=0
+    (cd "$ROOT_DIR" && "$ANALYZER_BIN" --sarif --no-db mc_tests/tests/test16_dangerous_functions.c >/dev/null 2>&1) || rc=$?
+    expect_eq "$rc" "1" "sarif mode: exit 1 on findings by default"
+
+    # SARIF mode: clean file → exit 0
+    rc=0
+    (cd "$ROOT_DIR" && "$ANALYZER_BIN" --sarif --no-db mc_tests/tests/test30_clean_file.c >/dev/null 2>&1) || rc=$?
+    expect_eq "$rc" "0" "sarif mode: exit 0 on clean file"
+}
+
+# ----------------------------------------------------------------------
 # Test 17: Finding pipeline sees extra-check findings
 # ----------------------------------------------------------------------
 test_finding_pipeline_extra_checks() {
@@ -1203,6 +1240,7 @@ main() {
     test_inline_suppress
     test_sarif_output
     test_warn_exit
+    test_gcc_sarif_default_exit
     test_finding_pipeline_extra_checks
     test_json_issue_count
     test_json_diagnostics
