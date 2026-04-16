@@ -359,6 +359,20 @@ typedef void (*mc_call_sink)(const mc_ts_file *file,
                              const mc_call_info *info,
                              void *userdata);
 
+/* Unified finding from any analysis pass. */
+typedef struct {
+    const char *file;
+    unsigned line;
+    unsigned col;
+    char symbol[64];
+    const char *category;   /* suppression / JSON category */
+    const char *db_kind;    /* DB facts.kind */
+    char message[256];
+    int use_issue_format;   /* 1 → mc_report_issue output; 0 → mc_report_fact_kind */
+} mc_finding;
+
+typedef void (*mc_finding_sink)(const mc_finding *f, void *userdata);
+
 /* --- format-string helper ------------------------------------------- */
 
 static bool is_nonliteral_format_call(const mc_ts_file *file,
@@ -450,7 +464,7 @@ static bool is_nonliteral_format_call(const mc_ts_file *file,
     return true;
 }
 
-/* forward-declare (defined below, after text_warning_sink) */
+/* forward-declare (defined below, after finding adapters) */
 static void mc_ts_node_text_copy(const mc_ts_file *f,
                                  TSNode node,
                                  char *buf,
@@ -734,71 +748,73 @@ static void analyze_calls(const mc_ts_file *f, mc_call_sink sink, void *userdata
     ts_query_delete(query);
 }
 
-/* --- text warnings (for humans + tests) ----------------------------- */
+/* --- finding adapters (call → finding, finding → text) -------------- */
 
-static void text_warning_sink(const mc_ts_file *file,
-                              const mc_call_info *info,
-                              void *userdata) {
-    (void)userdata;
+typedef struct {
+    mc_finding_sink sink;
+    void *userdata;
+} finding_adapter_ctx;
 
-    char msg[256];
+static void call_to_finding_sink(const mc_ts_file *file,
+                                 const mc_call_info *info,
+                                 void *userdata)
+{
+    finding_adapter_ctx *ctx = userdata;
+    mc_finding f;
+    memset(&f, 0, sizeof f);
+
+    f.file = file->path;
+    f.line = info->line;
+    f.col  = info->col;
+    snprintf(f.symbol, sizeof f.symbol, "%s", info->func_name);
 
     if (info->flags & MC_FUNC_RULE_DANGEROUS) {
-        snprintf(msg, sizeof(msg),
+        snprintf(f.message, sizeof f.message,
                  "warning: use of dangerous function %s()",
                  info->func_name);
-        mc_report_fact_kind(file->path,
-                            info->line,
-                            info->col,
-                            info->func_name,
-                            "dangerous_function",
-                            msg,
-                            0);
+        f.category = "dangerous_function";
+        f.db_kind  = "dangerous_function";
+    } else if ((info->flags & MC_FUNC_RULE_FORMAT_STRING) &&
+               is_nonliteral_format_call(file, info)) {
+        snprintf(f.message, sizeof f.message,
+                 "warning: non-literal format string in %s()",
+                 info->func_name);
+        f.category = "format_string";
+        f.db_kind  = "format_string";
+    } else if (info->flags & MC_FUNC_RULE_RETVAL_MUST_CHECK) {
+        if (info->status == MC_CALL_STATUS_UNCHECKED ||
+            info->status == MC_CALL_STATUS_IGNORED_EXPLICIT) {
+            snprintf(f.message, sizeof f.message,
+                     "unchecked return value of %s()",
+                     info->func_name);
+            f.category = "return_value_check";
+            f.db_kind  = "retval_unchecked";
+            f.use_issue_format = 1;
+        } else if (info->status == MC_CALL_STATUS_STORED_UNCHECKED) {
+            snprintf(f.message, sizeof f.message,
+                     "stored but unchecked return value of %s()",
+                     info->func_name);
+            f.category = "return_value_check";
+            f.db_kind  = "return_value_check";
+        } else {
+            return;
+        }
+    } else {
         return;
     }
 
-    if (info->flags & MC_FUNC_RULE_FORMAT_STRING) {
-        if (is_nonliteral_format_call(file, info)) {
-            snprintf(msg, sizeof(msg),
-                     "warning: non-literal format string in %s()",
-                     info->func_name);
-            mc_report_fact_kind(file->path,
-                                info->line,
-                                info->col,
-                                info->func_name,
-                                "format_string",
-                                msg,
-                                0);
-            return;
-        }
-    }
+    ctx->sink(&f, ctx->userdata);
+}
 
-    if (info->flags & MC_FUNC_RULE_RETVAL_MUST_CHECK) {
-        if (info->status == MC_CALL_STATUS_UNCHECKED ||
-            info->status == MC_CALL_STATUS_IGNORED_EXPLICIT) {
-            snprintf(msg, sizeof(msg),
-                     "unchecked return value of %s()",
-                     info->func_name);
-
-            mc_report_issue(file->path,
-                            info->line,
-                            info->col,
-                            info->func_name,
-                            msg,
-                            0);
-        } else if (info->status == MC_CALL_STATUS_STORED_UNCHECKED) {
-            snprintf(msg, sizeof(msg),
-                     "stored but unchecked return value of %s()",
-                     info->func_name);
-
-            mc_report_fact_kind(file->path,
-                                info->line,
-                                info->col,
-                                info->func_name,
-                                "return_value_check",
-                                msg,
-                                0);
-        }
+static void text_finding_sink(const mc_finding *f, void *userdata)
+{
+    (void)userdata;
+    if (f->use_issue_format) {
+        mc_report_issue(f->file, f->line, f->col,
+                        f->symbol, f->message, 0);
+    } else {
+        mc_report_fact_kind(f->file, f->line, f->col,
+                            f->symbol, f->db_kind, f->message, 0);
     }
 }
 
@@ -926,7 +942,9 @@ static void mc_ts_string_literal_contents(const mc_ts_file *f,
 }
 
 static void mc_extra_check_env_call(const mc_ts_file *f,
-                                    TSNode call)
+                                    TSNode call,
+                                    mc_finding_sink sink,
+                                    void *userdata)
 {
     TSNode func = ts_node_child_by_field_name(call, "function",
                                               (uint32_t)strlen("function"));
@@ -963,16 +981,16 @@ static void mc_extra_check_env_call(const mc_ts_file *f,
                  "insecure_env_usage: environment accessed via %s()", name);
     }
 
-    uint32_t line = mc_ts_node_start_line(f, call);
-    uint32_t col  = mc_ts_node_start_col(call);
-
-    mc_report_fact_kind(f->path,
-                        line,
-                        col,
-                        symbol,
-                        "insecure_env_usage",
-                        msg,
-                        0);
+    mc_finding finding;
+    memset(&finding, 0, sizeof finding);
+    finding.file     = f->path;
+    finding.line     = mc_ts_node_start_line(f, call);
+    finding.col      = mc_ts_node_start_col(call);
+    snprintf(finding.symbol, sizeof finding.symbol, "%s", symbol);
+    finding.category = "insecure_env_usage";
+    finding.db_kind  = "insecure_env_usage";
+    snprintf(finding.message, sizeof finding.message, "%s", msg);
+    sink(&finding, userdata);
 }
 
 /* --- malloc_size_mismatch ------------------------------------------- */
@@ -986,7 +1004,9 @@ static bool mc_is_malloc_like_name(const char *name)
 /* String-based pattern: look for "sizeof(p)" or "sizeof (p)" in the initializer
    text, where p is the pointer variable we are declaring. */
 static void mc_extra_check_declaration_malloc_mismatch(const mc_ts_file *f,
-                                                       TSNode decl)
+                                                       TSNode decl,
+                                                       mc_finding_sink sink,
+                                                       void *userdata)
 {
     uint32_t count = ts_node_named_child_count(decl);
     for (uint32_t i = 0; i < count; i++) {
@@ -1036,20 +1056,18 @@ static void mc_extra_check_declaration_malloc_mismatch(const mc_ts_file *f,
         if (strstr(init_text, pat1) == NULL && strstr(init_text, pat2) == NULL)
             continue;
 
-        uint32_t line = mc_ts_node_start_line(f, value);
-        uint32_t col  = mc_ts_node_start_col(value);
-        char msg[256];
-        snprintf(msg, sizeof msg,
+        mc_finding finding;
+        memset(&finding, 0, sizeof finding);
+        finding.file     = f->path;
+        finding.line     = mc_ts_node_start_line(f, value);
+        finding.col      = mc_ts_node_start_col(value);
+        snprintf(finding.symbol, sizeof finding.symbol, "%s", var_name);
+        finding.category = "malloc_size_mismatch";
+        finding.db_kind  = "malloc_size_mismatch";
+        snprintf(finding.message, sizeof finding.message,
                  "malloc_size_mismatch: allocation for '%s' uses sizeof(%s); did you mean sizeof(*%s) or sizeof(type)?",
                  var_name, var_name, var_name);
-
-        mc_report_fact_kind(f->path,
-                            line,
-                            col,
-                            var_name,
-                            "malloc_size_mismatch",
-                            msg,
-                            0);
+        sink(&finding, userdata);
     }
 }
 
@@ -1162,7 +1180,9 @@ static bool mc_is_terminal_close(const mc_ts_file *f, TSNode call)
 static void mc_extra_check_double_close_call(const mc_ts_file *f,
                                              TSNode call,
                                              mc_closed_entry *table,
-                                             size_t table_len)
+                                             size_t table_len,
+                                             mc_finding_sink sink,
+                                             void *userdata)
 {
     TSNode func = ts_node_child_by_field_name(call, "function",
                                               (uint32_t)strlen("function"));
@@ -1215,20 +1235,18 @@ static void mc_extra_check_double_close_call(const mc_ts_file *f,
             if (table[i].terminal)
                 continue;
 
-            uint32_t line = mc_ts_node_start_line(f, call);
-            uint32_t col  = mc_ts_node_start_col(call);
-            char msg[256];
-            snprintf(msg, sizeof msg,
+            mc_finding finding;
+            memset(&finding, 0, sizeof finding);
+            finding.file     = f->path;
+            finding.line     = mc_ts_node_start_line(f, call);
+            finding.col      = mc_ts_node_start_col(call);
+            snprintf(finding.symbol, sizeof finding.symbol, "%s", var);
+            finding.category = "double_close";
+            finding.db_kind  = "double_close";
+            snprintf(finding.message, sizeof finding.message,
                      "double_close: second call to %s(%s); first at line %u",
                      name, var, table[i].first_line);
-
-            mc_report_fact_kind(f->path,
-                                line,
-                                col,
-                                var,
-                                "double_close",
-                                msg,
-                                0);
+            sink(&finding, userdata);
             return;
         }
     }
@@ -1251,7 +1269,9 @@ static void mc_extra_check_double_close_call(const mc_ts_file *f,
 /* --- per-function DFS for extra checks ------------------------------ */
 
 static void mc_extra_check_function_body(const mc_ts_file *f,
-                                         TSNode func_def)
+                                         TSNode func_def,
+                                         mc_finding_sink sink,
+                                         void *userdata)
 {
     TSNode body = ts_node_child_by_field_name(func_def, "body",
                                               (uint32_t)strlen("body"));
@@ -1271,10 +1291,12 @@ static void mc_extra_check_function_body(const mc_ts_file *f,
 
         if (strcmp(type, "call_expression") == 0) {
             mc_extra_check_double_close_call(f, node,
-                                             closed, MC_MAX_CLOSED_VARS);
-            mc_extra_check_env_call(f, node);
+                                             closed, MC_MAX_CLOSED_VARS,
+                                             sink, userdata);
+            mc_extra_check_env_call(f, node, sink, userdata);
         } else if (strcmp(type, "declaration") == 0) {
-            mc_extra_check_declaration_malloc_mismatch(f, node);
+            mc_extra_check_declaration_malloc_mismatch(f, node,
+                                                       sink, userdata);
         }
 
         uint32_t child_count = ts_node_named_child_count(node);
@@ -1286,16 +1308,27 @@ static void mc_extra_check_function_body(const mc_ts_file *f,
     }
 }
 
-static void mc_run_extra_checks(const mc_ts_file *f)
+static void mc_run_extra_checks(const mc_ts_file *f,
+                                mc_finding_sink sink,
+                                void *userdata)
 {
     TSNode root = f->root;
     uint32_t n = ts_node_named_child_count(root);
     for (uint32_t i = 0; i < n; i++) {
         TSNode node = ts_node_named_child(root, i);
         if (strcmp(ts_node_type(node), "function_definition") == 0) {
-            mc_extra_check_function_body(f, node);
+            mc_extra_check_function_body(f, node, sink, userdata);
         }
     }
+}
+
+static void mc_collect_all_findings(const mc_ts_file *f,
+                                    mc_finding_sink sink,
+                                    void *userdata)
+{
+    finding_adapter_ctx ctx = { .sink = sink, .userdata = userdata };
+    analyze_calls(f, call_to_finding_sink, &ctx);
+    mc_run_extra_checks(f, sink, userdata);
 }
 
 /* --- public entrypoints -------------------------------------------- */
@@ -1305,8 +1338,7 @@ bool mc_ts_report_unchecked_calls(const char *path) {
     if (!mc_ts_file_init(&f, path))
         return false;
 
-    analyze_calls(&f, text_warning_sink, NULL);
-    mc_run_extra_checks(&f);
+    mc_collect_all_findings(&f, text_finding_sink, NULL);
 
     mc_ts_file_destroy(&f);
     return true;
@@ -1435,8 +1467,7 @@ bool mc_ts_report_unchecked_calls_ex(const char *path,
         return false;
     }
 
-    analyze_calls(&f, text_warning_sink, NULL);
-    mc_run_extra_checks(&f);
+    mc_collect_all_findings(&f, text_finding_sink, NULL);
 
     mc_ts_file_destroy(&f);
     return true;

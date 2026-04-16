@@ -758,6 +758,47 @@ test_warn_exit() {
 }
 
 # ----------------------------------------------------------------------
+# Test 17: Finding pipeline sees extra-check findings
+# ----------------------------------------------------------------------
+test_finding_pipeline_extra_checks() {
+    log_info "=== Test 17: Finding pipeline – extra-check findings ==="
+
+    # env_usage.c: pipeline must produce insecure_env_usage findings
+    local out_env
+    out_env="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --no-db mc_tests/tests/env_usage.c 2>&1)" || true
+
+    local env_count
+    env_count="$(echo "$out_env" | grep -c 'insecure_env_usage:' || true)"
+    expect_eq "$env_count" "4" "pipeline: env_usage.c produces 4 insecure_env_usage findings"
+
+    # malloc_bad.c: pipeline must produce malloc_size_mismatch findings
+    local out_malloc
+    out_malloc="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --no-db mc_tests/tests/malloc_bad.c 2>&1)" || true
+
+    local malloc_count
+    malloc_count="$(echo "$out_malloc" | grep -c 'malloc_size_mismatch:' || true)"
+    expect_eq "$malloc_count" "2" "pipeline: malloc_bad.c produces 2 malloc_size_mismatch findings"
+
+    # double_close.c: pipeline must produce double_close findings
+    local out_dc
+    out_dc="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --no-db mc_tests/tests/double_close.c 2>&1)" || true
+
+    local dc_count
+    dc_count="$(echo "$out_dc" | grep -c 'double_close:' || true)"
+    expect_eq "$dc_count" "2" "pipeline: double_close.c produces 2 double_close findings"
+
+    # All three fixture types also produce return-value findings via the same pipeline
+    local retval_env retval_malloc retval_dc
+    retval_env="$(echo "$out_env" | grep -c 'ignored return of' || true)"
+    retval_malloc="$(echo "$out_malloc" | grep -c 'stored but unchecked' || true)"
+    retval_dc="$(echo "$out_dc" | grep -c 'ignored return of' || true)"
+
+    expect_eq "$retval_env" "1" "pipeline: env_usage.c retval finding coexists"
+    expect_eq "$retval_malloc" "4" "pipeline: malloc_bad.c retval findings coexist"
+    expect_eq "$retval_dc" "2" "pipeline: double_close.c retval findings coexist"
+}
+
+# ----------------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------------
 main() {
@@ -777,6 +818,7 @@ main() {
     test_suppressions
     test_inline_suppress
     test_warn_exit
+    test_finding_pipeline_extra_checks
 
     echo
     if [ "$failed" -eq 0 ]; then
