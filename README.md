@@ -227,6 +227,61 @@ functions.
 - **Static table + specdb fallback**: works out of the box, improves with data
 - **SQLite everywhere**: inspectable, queryable, portable
 
+## Showcase: what mancheck catches that others miss
+
+The `mc_tests/tests/showcase_*.c` files demonstrate bug classes where mancheck
+(current and planned) adds value over cppcheck and clang-tidy/clang-analyzer.
+Run the comparison yourself:
+
+```sh
+bash mc_tests/run_showcase_comparison.sh
+```
+
+### Bug classes and tool coverage
+
+| Bug class | cppcheck | clang-tidy | mancheck (current) | mancheck (planned) |
+|---|---|---|---|---|
+| **Wrong error-checking protocol** (strtol==-1, open==0, pthread+errno) | -- | -- | -- | specdb RETURN VALUE |
+| **errno misuse** (stale errno, wrong errno protocol) | -- | partial (unix.Errno) | -- | specdb ERRORS section |
+| **Partial write/read not looped** (write, send, fread) | -- | -- | -- | specdb RETURN VALUE |
+| **snprintf truncation ignored** (return >= size) | -- | cert-err33-c (unchecked only) | unchecked return | specdb truncation |
+| **Resource cleanup mismatch** (opendir+fclose, fopen+close, popen+fclose) | -- | -- | -- | specdb SYNOPSIS pairing |
+| **Linux-only APIs** (pipe2, epoll, unshare) | -- | -- | -- | specdb 3 vs 3posix diff |
+| **POSIX obsolescent** (usleep, asctime, ftime, bcopy) | partial (gets, asctime) | partial (bcopy, bzero, gets) | partial (gets, tmpnam, sprintf) | specdb 3posix status |
+| **Missing headers** (read without unistd.h) | -- | implicit-function-declaration | -- | specdb SYNOPSIS headers |
+| **Async-signal-unsafe** (printf in signal handler) | -- | bugprone-signal-handler | -- | specdb signal-safety(7) |
+| **MT-Unsafe in threads** (strtok, localtime, getpwnam) | -- | concurrency-mt-unsafe | partial (strtok, getenv) | specdb ATTRIBUTES |
+
+### Key findings from the comparison
+
+**Nobody catches** (mancheck's opportunity):
+- Wrong error protocol: `strtol()` checked with `== -1`, `open()` checked with `== 0`, `pthread_create()` errors checked via errno
+- Partial write bugs: single `write()` call without loop on pipes/sockets
+- snprintf truncation: return value stored but not compared to buffer size
+- Resource cleanup mismatch: `opendir()` closed with `fclose()`, `popen()` closed with `fclose()`
+- Linux-only APIs used without portability guards: `pipe2()`, `epoll_create1()`, `unshare()`
+
+**clang-tidy catches but cppcheck misses**: signal safety, thread safety, bcopy/bzero
+
+**cppcheck catches but clang-tidy misses**: asctime deprecation, resource leaks
+
+**mancheck already catches uniquely**: broader unchecked return coverage via specdb (2500+ functions vs clang-tidy's ~150 in cert-err33-c)
+
+### Showcase files
+
+| File | Bug class |
+|---|---|
+| `showcase_wrong_error_check.c` | Wrong error-checking protocol per man page |
+| `showcase_errno_misuse.c` | errno protocol violations |
+| `showcase_partial_write.c` | Short write/read not handled |
+| `showcase_snprintf_truncation.c` | snprintf truncation undetected |
+| `showcase_resource_cleanup.c` | Allocation/deallocation pairing mismatch |
+| `showcase_portability.c` | Linux-only APIs, POSIX obsolescent functions |
+| `showcase_deprecated_posix.c` | POSIX-deprecated and removed interfaces |
+| `showcase_signal_safety.c` | Async-signal-unsafe calls in signal handlers |
+| `showcase_thread_safety.c` | MT-Unsafe functions in threaded code |
+| `showcase_header_mismatch.c` | Missing required headers per man page |
+
 ## Limitations
 
 - No control flow analysis -- doesn't track values across branches
