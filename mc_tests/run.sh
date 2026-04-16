@@ -869,6 +869,35 @@ test_finding_pipeline_extra_checks() {
     expect_eq "$retval_dc" "2" "pipeline: double_close.c retval findings coexist"
 }
 
+# Test 18: JSON issue_count includes extra-check diagnostics
+# ----------------------------------------------------------------------
+test_json_issue_count() {
+    log_info "=== Test 18: JSON issue_count parity with text mode ==="
+
+    # double_close.c text mode: 2 unchecked-return + 2 double_close = 4
+    local json_dc
+    json_dc="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --json --no-db mc_tests/tests/double_close.c 2>/dev/null)" || true
+
+    if echo "$json_dc" | grep -q '"issue_count"'; then
+        log_pass "JSON output contains issue_count field"
+        passed=$((passed+1))
+    else
+        log_fail "JSON output missing issue_count field"
+        failed=$((failed+1))
+    fi
+
+    local ic_dc
+    ic_dc="$(echo "$json_dc" | grep -o '"issue_count":[0-9]*' | head -1 | grep -o '[0-9]*$')"
+    expect_eq "$ic_dc" "4" "JSON issue_count for double_close.c matches text-mode total"
+
+    # malloc_bad.c text mode: 4 retval + 2 malloc_size_mismatch = 6
+    local json_mb
+    json_mb="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --json --no-db mc_tests/tests/malloc_bad.c 2>/dev/null)" || true
+    local ic_mb
+    ic_mb="$(echo "$json_mb" | grep -o '"issue_count":[0-9]*' | head -1 | grep -o '[0-9]*$')"
+    expect_eq "$ic_mb" "6" "JSON issue_count for malloc_bad.c matches text-mode total"
+}
+
 # ----------------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------------
@@ -891,6 +920,7 @@ main() {
     test_sarif_output
     test_warn_exit
     test_finding_pipeline_extra_checks
+    test_json_issue_count
 
     echo
     if [ "$failed" -eq 0 ]; then

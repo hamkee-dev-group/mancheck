@@ -818,6 +818,23 @@ static void text_finding_sink(const mc_finding *f, void *userdata)
     }
 }
 
+/* Count-only finding sink: applies suppression and increments the
+ * per-run issue counter without printing or writing DB facts. */
+static void counting_finding_sink(const mc_finding *f, void *userdata)
+{
+    (void)userdata;
+    if (f->use_issue_format) {
+        if (mc_suppress_check(f->file, "return_value_check"))
+            return;
+    } else {
+        if (f->db_kind && mc_suppress_check(f->file, f->db_kind))
+            return;
+    }
+    if (mc_inline_suppress_check(f->line))
+        return;
+    mc_report_count_issue();
+}
+
 /* --- generic TS helpers for extra checks ---------------------------- */
 
 static void mc_ts_node_text_copy(const mc_ts_file *f,
@@ -1542,7 +1559,9 @@ bool mc_ts_report_file_json(const char *path) {
     mc_json_escape(stdout, path);
     printf(",\"calls\":[\n");
     analyze_calls(&f, json_sink, &st);
-    printf("\n  ]}");
+    printf("\n  ],\"issue_count\":");
+    mc_run_extra_checks(&f, counting_finding_sink, NULL);
+    printf("%llu}", mc_report_get_run_issue_count());
 
     mc_ts_file_destroy(&f);
     return true;
@@ -1618,7 +1637,9 @@ bool mc_ts_report_file_json_ex(const char *path,
     mc_json_escape(stdout, path);
     printf(",\"calls\":[\n");
     analyze_calls(&f, json_sink, &st);
-    printf("\n  ]}");
+    printf("\n  ],\"issue_count\":");
+    mc_run_extra_checks(&f, counting_finding_sink, NULL);
+    printf("%llu}", mc_report_get_run_issue_count());
 
     mc_ts_file_destroy(&f);
     return true;
