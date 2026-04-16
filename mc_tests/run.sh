@@ -53,6 +53,7 @@ need_tool() {
 
 need_tool sqlite3
 need_tool make
+need_tool clang
 
 log_info "Project root: $ROOT_DIR"
 
@@ -899,6 +900,33 @@ test_json_issue_count() {
 }
 
 # ----------------------------------------------------------------------
+# Test 19: mc_preprocess_clang honors compile_cmd -std
+# ----------------------------------------------------------------------
+test_preprocess_compile_cmd_std() {
+    log_info "=== Test 19: mc_preprocess_clang compile_cmd -std ==="
+
+    local helper_src="${ROOT_DIR}/mc_tests/helpers/preproc_std_helper.c"
+    local helper_bin="${OUT_DIR}/preproc_std_helper"
+    local fixture="${ROOT_DIR}/mc_tests/fixtures/preproc_std_fixture.c"
+
+    rm -f "$helper_bin"
+
+    run_cmd clang -std=c11 -Wall -Wextra -Wpedantic \
+        -I"${ROOT_DIR}/analyzer/src" \
+        -o "$helper_bin" \
+        "$helper_src" \
+        "${ROOT_DIR}/analyzer/src/mc_preproc.c"
+
+    if run_cmd "$helper_bin" "$fixture"; then
+        log_pass "compile_cmd -std overrides fallback and preserves fallback cases"
+        passed=$((passed+1))
+    else
+        log_fail "compile_cmd -std regression"
+        failed=$((failed+1))
+    fi
+}
+
+# ----------------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------------
 main() {
@@ -921,6 +949,7 @@ main() {
     test_warn_exit
     test_finding_pipeline_extra_checks
     test_json_issue_count
+    test_preprocess_compile_cmd_std
 
     echo
     if [ "$failed" -eq 0 ]; then

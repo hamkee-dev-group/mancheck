@@ -272,6 +272,107 @@ mc_capture_command_output(const char *cmd)
     return buf;
 }
 
+static const char *
+mc_next_shell_token(const char *p, char *buf, size_t buf_size)
+{
+    size_t len = 0;
+    int quote = 0;
+
+    if (!p || !buf || buf_size == 0)
+        return NULL;
+
+    while (*p != '\0' && is_space_char((unsigned char)*p))
+        p++;
+
+    if (*p == '\0')
+        return NULL;
+
+    while (*p != '\0')
+    {
+        unsigned char c = (unsigned char)*p;
+
+        if (quote != 0)
+        {
+            if (c == (unsigned char)quote)
+            {
+                quote = 0;
+                p++;
+                continue;
+            }
+        }
+        else
+        {
+            if (is_space_char(c))
+                break;
+            if (c == '\'' || c == '"')
+            {
+                quote = (int)c;
+                p++;
+                continue;
+            }
+        }
+
+        if (c == '\\' && p[1] != '\0')
+        {
+            p++;
+            c = (unsigned char)*p;
+        }
+
+        if (len + 1 < buf_size)
+            buf[len++] = (char)c;
+        p++;
+    }
+
+    buf[len] = '\0';
+    return p;
+}
+
+static char *
+mc_extract_compile_std(const char *compile_cmd)
+{
+    if (!compile_cmd)
+        return NULL;
+
+    size_t tok_cap = strlen(compile_cmd) + 1;
+    char *tok = malloc(tok_cap);
+    if (!tok)
+        return NULL;
+
+    char *std = NULL;
+    const char *p = compile_cmd;
+
+    for (;;)
+    {
+        p = mc_next_shell_token(p, tok, tok_cap);
+        if (!p)
+            break;
+
+        if (strncmp(tok, "-std=", 5) == 0 && tok[5] != '\0')
+        {
+            free(std);
+            std = strdup(tok + 5);
+            if (!std)
+                break;
+            continue;
+        }
+
+        if (strcmp(tok, "-std") == 0)
+        {
+            p = mc_next_shell_token(p, tok, tok_cap);
+            if (!p || tok[0] == '\0')
+                break;
+
+            free(std);
+            std = strdup(tok);
+            if (!std)
+                break;
+        }
+    }
+
+    free(tok);
+    return std;
+}
+
 /* Best-effort clang -E:
  * - on success: fills views->src_pp
  * - on failure: leaves src_pp == NULL but returns 0 so pipeline continues
@@ -285,23 +386,38 @@ int mc_preprocess_clang(mc_source_views *views,
     const char *clang = (cfg && cfg->clang_path) ? cfg->clang_path : "clang";
     const char *extra = (cfg && cfg->extra_flags) ? cfg->extra_flags : "";
     const char *path = views->meta.abs_path;
+    char *compile_std = mc_extract_compile_std(views->meta.compile_cmd);
 
     /* Add " 2>/dev/null" to silence clang diagnostics */
     const char *redir = " 2>/dev/null";
 
-    size_t len = strlen(clang) + 4 + strlen(extra) + 1 +
-                 strlen(path) + strlen(redir) + 1;
+    size_t len = strlen(clang) + 4 + strlen(path) + strlen(redir) + 1;
+    if (extra[0] != '\0')
+        len += strlen(extra) + 1;
+    if (compile_std)
+        len += 6 + strlen(compile_std);
+
     char *cmd = malloc(len);
     if (!cmd)
+    {
+        free(compile_std);
         return -1;
+    }
 
-    if (extra[0] != '\0')
+    if (extra[0] != '\0' && compile_std)
+        (void)snprintf(cmd, len, "%s -E %s -std=%s %s%s",
+                       clang, extra, compile_std, path, redir);
+    else if (extra[0] != '\0')
         (void)snprintf(cmd, len, "%s -E %s %s%s", clang, extra, path, redir);
+    else if (compile_std)
+        (void)snprintf(cmd, len, "%s -E -std=%s %s%s",
+                       clang, compile_std, path, redir);
     else
         (void)snprintf(cmd, len, "%s -E %s%s", clang, path, redir);
 
     char *out = mc_capture_command_output(cmd);
     free(cmd);
+    free(compile_std);
 
     if (!out)
     {
