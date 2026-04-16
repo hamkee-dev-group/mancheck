@@ -882,6 +882,92 @@ test_inline_suppress_comment_only_chain() {
 }
 
 # ----------------------------------------------------------------------
+# Test 15c: NOLINT(mancheck) next-warning and spaced same-line forms
+# ----------------------------------------------------------------------
+test_inline_suppress_nolint_next_warn() {
+    log_info "=== Test 15c: NOLINT next-warning and spaced same-line ==="
+
+    local src="mc_tests/tests/test39_nolint_next_warn.c"
+    local out
+    out="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --no-db "$src" 2>&1)" || true
+
+    local count
+    count="$(echo "$out" | grep -c ':' || true)"
+    expect_eq "$count" "2" "NOLINT next-warning: 2 diagnostics remain"
+
+    if echo "$out" | grep -q 'test39_nolint_next_warn\.c:10:'; then
+        log_fail "NOLINT next-warning: comment-only marker did not suppress line 10"
+        failed=$((failed+1))
+    else
+        log_pass "NOLINT next-warning: comment-only marker suppressed line 10"
+        passed=$((passed+1))
+    fi
+
+    if echo "$out" | grep -q 'test39_nolint_next_warn\.c:11:.*read()'; then
+        log_pass "NOLINT next-warning: later read() at line 11 reports"
+        passed=$((passed+1))
+    else
+        log_fail "NOLINT next-warning: later read() at line 11 missing"
+        failed=$((failed+1))
+    fi
+
+    if echo "$out" | grep -q 'test39_nolint_next_warn\.c:12:'; then
+        log_fail "NOLINT next-warning: spaced same-line marker did not suppress line 12"
+        failed=$((failed+1))
+    else
+        log_pass "NOLINT next-warning: spaced same-line marker suppressed line 12"
+        passed=$((passed+1))
+    fi
+
+    if echo "$out" | grep -q 'test39_nolint_next_warn\.c:13:.*gets()'; then
+        log_pass "NOLINT next-warning: gets() at line 13 reports"
+        passed=$((passed+1))
+    else
+        log_fail "NOLINT next-warning: gets() at line 13 missing"
+        failed=$((failed+1))
+    fi
+
+    local out_json
+    out_json="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --json --no-db "$src" 2>/dev/null)" || true
+
+    if echo "$out_json" | grep -q '"line":10'; then
+        log_fail "NOLINT next-warning JSON: suppressed line 10 still present"
+        failed=$((failed+1))
+    else
+        log_pass "NOLINT next-warning JSON: line 10 suppressed"
+        passed=$((passed+1))
+    fi
+
+    if echo "$out_json" | grep -q '"line":11'; then
+        log_pass "NOLINT next-warning JSON: line 11 preserved"
+        passed=$((passed+1))
+    else
+        log_fail "NOLINT next-warning JSON: line 11 missing"
+        failed=$((failed+1))
+    fi
+
+    if echo "$out_json" | grep -q '"line":12'; then
+        log_fail "NOLINT next-warning JSON: suppressed line 12 still present"
+        failed=$((failed+1))
+    else
+        log_pass "NOLINT next-warning JSON: line 12 suppressed"
+        passed=$((passed+1))
+    fi
+
+    if echo "$out_json" | grep -q '"line":13'; then
+        log_pass "NOLINT next-warning JSON: line 13 preserved"
+        passed=$((passed+1))
+    else
+        log_fail "NOLINT next-warning JSON: line 13 missing"
+        failed=$((failed+1))
+    fi
+
+    local json_issue_count
+    json_issue_count="$(echo "$out_json" | grep -o '"issue_count":[0-9]*' | head -n1 | cut -d: -f2)"
+    expect_eq "$json_issue_count" "2" "NOLINT next-warning JSON: issue_count is 2"
+}
+
+# ----------------------------------------------------------------------
 # Test 16a: SARIF output mode
 # ----------------------------------------------------------------------
 test_sarif_output() {
@@ -1500,6 +1586,7 @@ main() {
     test_suppressions
     test_inline_suppress
     test_inline_suppress_comment_only_chain
+    test_inline_suppress_nolint_next_warn
     test_sarif_output
     test_warn_exit
     test_gcc_sarif_default_exit

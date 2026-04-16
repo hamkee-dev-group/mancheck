@@ -1,0 +1,2 @@
+tests/test39_nolint_next_warn.c:11:5: ignored return of read(): unchecked return value of read()
+tests/test39_nolint_next_warn.c:13:5: warning: use of dangerous function gets()
