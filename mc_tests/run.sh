@@ -538,6 +538,121 @@ test_gcc_format_double_close() {
 }
 
 # ----------------------------------------------------------------------
+# Test 22: GCC stream split – diagnostics to stderr, stdout empty
+# ----------------------------------------------------------------------
+test_gcc_stream_split() {
+    log_info "=== Test 22: GCC stream split ==="
+
+    local rc tmpout tmperr
+
+    # --- test27_mixed_categories.c ---
+    tmpout="$(mktemp)"
+    tmperr="$(mktemp)"
+    rc=0
+    (cd "$ROOT_DIR" && "$ANALYZER_BIN" --gcc --no-db mc_tests/tests/test27_mixed_categories.c) \
+        >"$tmpout" 2>"$tmperr" || rc=$?
+
+    expect_eq "$rc" "1" "gcc-split test27: exit 1"
+
+    if [ ! -s "$tmpout" ]; then
+        log_pass "gcc-split test27: stdout empty"
+        passed=$((passed+1))
+    else
+        log_fail "gcc-split test27: stdout not empty"
+        failed=$((failed+1))
+    fi
+
+    local err_lines
+    err_lines="$(wc -l < "$tmperr")"
+    expect_eq "$err_lines" "4" "gcc-split test27: stderr has 4 lines"
+
+    for line_num in 11 14 17 20; do
+        if grep -q "^mc_tests/tests/test27_mixed_categories\.c:${line_num}:5: warning:" "$tmperr"; then
+            log_pass "gcc-split test27: diagnostic at line $line_num"
+            passed=$((passed+1))
+        else
+            log_fail "gcc-split test27: missing diagnostic at line $line_num"
+            failed=$((failed+1))
+        fi
+    done
+
+    grep -q 'gets()'    "$tmperr" && { log_pass "gcc-split test27: gets()";    passed=$((passed+1)); } \
+                                   || { log_fail "gcc-split test27: gets()";    failed=$((failed+1)); }
+    grep -q 'read()'    "$tmperr" && { log_pass "gcc-split test27: read()";    passed=$((passed+1)); } \
+                                   || { log_fail "gcc-split test27: read()";    failed=$((failed+1)); }
+    grep -q 'printf()'  "$tmperr" && { log_pass "gcc-split test27: printf()";  passed=$((passed+1)); } \
+                                   || { log_fail "gcc-split test27: printf()";  failed=$((failed+1)); }
+    grep -q 'sprintf()' "$tmperr" && { log_pass "gcc-split test27: sprintf()"; passed=$((passed+1)); } \
+                                   || { log_fail "gcc-split test27: sprintf()"; failed=$((failed+1)); }
+
+    rm -f "$tmpout" "$tmperr"
+
+    # --- double_close.c ---
+    tmpout="$(mktemp)"
+    tmperr="$(mktemp)"
+    rc=0
+    (cd "$ROOT_DIR" && "$ANALYZER_BIN" --gcc --no-db mc_tests/tests/double_close.c) \
+        >"$tmpout" 2>"$tmperr" || rc=$?
+
+    expect_eq "$rc" "1" "gcc-split double_close: exit 1"
+
+    if [ ! -s "$tmpout" ]; then
+        log_pass "gcc-split double_close: stdout empty"
+        passed=$((passed+1))
+    else
+        log_fail "gcc-split double_close: stdout not empty"
+        failed=$((failed+1))
+    fi
+
+    err_lines="$(wc -l < "$tmperr")"
+    expect_eq "$err_lines" "4" "gcc-split double_close: stderr has 4 lines"
+
+    local close_count
+    close_count="$(grep -c 'ignored return of close()' "$tmperr" || true)"
+    expect_eq "$close_count" "2" "gcc-split double_close: 2 ignored-return-of-close diagnostics"
+
+    local dc_count
+    dc_count="$(grep -c 'double_close:' "$tmperr" || true)"
+    expect_eq "$dc_count" "2" "gcc-split double_close: 2 double_close diagnostics"
+
+    grep -q 'second call to close(fd); first at line 9'  "$tmperr" \
+        && { log_pass "gcc-split double_close: close(fd) detail"; passed=$((passed+1)); } \
+        || { log_fail "gcc-split double_close: close(fd) detail"; failed=$((failed+1)); }
+    grep -q 'second call to free(p); first at line 12'   "$tmperr" \
+        && { log_pass "gcc-split double_close: free(p) detail";  passed=$((passed+1)); } \
+        || { log_fail "gcc-split double_close: free(p) detail";  failed=$((failed+1)); }
+
+    rm -f "$tmpout" "$tmperr"
+
+    # --- test30_clean_file.c ---
+    tmpout="$(mktemp)"
+    tmperr="$(mktemp)"
+    rc=0
+    (cd "$ROOT_DIR" && "$ANALYZER_BIN" --gcc --no-db mc_tests/tests/test30_clean_file.c) \
+        >"$tmpout" 2>"$tmperr" || rc=$?
+
+    expect_eq "$rc" "0" "gcc-split clean: exit 0"
+
+    if [ ! -s "$tmpout" ]; then
+        log_pass "gcc-split clean: stdout empty"
+        passed=$((passed+1))
+    else
+        log_fail "gcc-split clean: stdout not empty"
+        failed=$((failed+1))
+    fi
+
+    if [ ! -s "$tmperr" ]; then
+        log_pass "gcc-split clean: stderr empty"
+        passed=$((passed+1))
+    else
+        log_fail "gcc-split clean: stderr not empty"
+        failed=$((failed+1))
+    fi
+
+    rm -f "$tmpout" "$tmperr"
+}
+
+# ----------------------------------------------------------------------
 # Test 14: --suppressions config
 # ----------------------------------------------------------------------
 test_suppressions() {
@@ -1317,6 +1432,7 @@ main() {
     test_preprocess_compile_cmd_std
     test_analyzer_compile_commands_integration
     test_cli_error_paths
+    test_gcc_stream_split
 
     echo
     if [ "$failed" -eq 0 ]; then

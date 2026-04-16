@@ -63,12 +63,13 @@ void mc_report_fact_kind(const char *file,
 
     if (!quiet) {
         const char *m = msg ? msg : "";
+        FILE *out = g_gcc_mode ? stderr : stdout;
         if (g_gcc_mode && strncmp(m, "warning: ", 9) != 0)
-            printf("%s:%u:%u: warning: %s\n",
-                   file ? file : "<input>", line, column, m);
+            fprintf(out, "%s:%u:%u: warning: %s\n",
+                    file ? file : "<input>", line, column, m);
         else
-            printf("%s:%u:%u: %s\n",
-                   file ? file : "<input>", line, column, m);
+            fprintf(out, "%s:%u:%u: %s\n",
+                    file ? file : "<input>", line, column, m);
     }
     g_run_issues++;
 
@@ -106,13 +107,14 @@ void mc_report_issue(const char *file,
         return;
 
     if (!quiet) {
-        printf("%s:%u:%u: %signored return of %s(): %s\n",
-               file ? file : "<input>",
-               line,
-               column,
-               g_gcc_mode ? "warning: " : "",
-               func_name ? func_name : "<func>",
-               msg ? msg : "");
+        fprintf(g_gcc_mode ? stderr : stdout,
+                "%s:%u:%u: %signored return of %s(): %s\n",
+                file ? file : "<input>",
+                line,
+                column,
+                g_gcc_mode ? "warning: " : "",
+                func_name ? func_name : "<func>",
+                msg ? msg : "");
     }
     g_run_issues++;
 
