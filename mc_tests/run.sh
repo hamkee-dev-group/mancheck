@@ -1522,6 +1522,37 @@ test_analyzer_compile_commands_integration() {
 }
 
 # ----------------------------------------------------------------------
+# Test 21b: per-file -std from compile_commands affects analyzer output
+# ----------------------------------------------------------------------
+test_analyzer_compile_commands_per_file_std() {
+    log_info "=== Test 21b: per-file -std from compile_commands ==="
+
+    local compdb="${ROOT_DIR}/mc_tests/fixtures/per_file_std_compdb/compile_commands.json"
+    local c11_src="mc_tests/fixtures/per_file_std_compdb/c11_file.c"
+    local c2x_src="mc_tests/fixtures/per_file_std_compdb/c2x_file.c"
+
+    local out
+    out="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --no-db --compile-commands "$compdb" \
+        "$c11_src" "$c2x_src" 2>&1)" || true
+
+    if echo "$out" | grep -q 'c11_file\.c:.*warning: use of dangerous function gets()'; then
+        log_fail "per-file -std: c11 file should not expand MAYBE_GETS to gets()"
+        failed=$((failed+1))
+    else
+        log_pass "per-file -std: c11 file produces no gets() warning"
+        passed=$((passed+1))
+    fi
+
+    if echo "$out" | grep -q 'c2x_file\.c:.*warning: use of dangerous function gets()'; then
+        log_pass "per-file -std: c2x file expands MAYBE_GETS to gets() warning"
+        passed=$((passed+1))
+    else
+        log_fail "per-file -std: c2x file missing gets() warning (got: $out)"
+        failed=$((failed+1))
+    fi
+}
+
+# ----------------------------------------------------------------------
 # Test 22: Bad compile_commands entry fails loudly
 # ----------------------------------------------------------------------
 test_bad_compdb_fails() {
@@ -1782,6 +1813,7 @@ main() {
     test_db_extra_check_facts
     test_preprocess_compile_cmd_std
     test_analyzer_compile_commands_integration
+    test_analyzer_compile_commands_per_file_std
     test_bad_compdb_fails
     test_cli_help
     test_cli_error_paths

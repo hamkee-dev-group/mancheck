@@ -1,0 +1,22 @@
+[
+  {
+    "directory": ".",
+    "file": "c11_file.c",
+    "arguments": [
+      "clang",
+      "-c",
+      "-std=c11",
+      "c11_file.c"
+    ]
+  },
+  {
+    "directory": ".",
+    "file": "c2x_file.c",
+    "arguments": [
+      "clang",
+      "-c",
+      "-std=gnu2x",
+      "c2x_file.c"
+    ]
+  }
+]
