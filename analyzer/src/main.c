@@ -18,6 +18,35 @@ print_usage(const char *prog)
             prog);
 }
 
+static void
+print_help(const char *prog)
+{
+    fprintf(stdout,
+        "Usage: %s [--json | --sarif] [--gcc] [--warn-exit] [--db PATH | --no-db] [--specdb PATH] [--compile-commands PATH] [--dump-views PATH] [--suppressions PATH] <c-file> [c-file...]\n"
+        "\n"
+        "Options:\n"
+        "  --json                    Emit JSON diagnostics\n"
+        "  --sarif                   Emit SARIF diagnostics\n"
+        "  --gcc                     Emit GCC-compatible diagnostic format\n"
+        "  --warn-exit               Exit non-zero when findings are reported\n"
+        "  --db PATH                 Write runs and facts into the given sqlite DB\n"
+        "  --no-db                   Disable DB integration for this run\n"
+        "  --specdb PATH             Load specdb for rule augmentation\n"
+        "  --compile-commands PATH   Use compile_commands.json for per-file flags\n"
+        "  --dump-views PATH         Write per-file preprocessing views as JSONL\n"
+        "  --suppressions PATH       Load suppression rules from PATH\n"
+        "  -h, --help                Show this help and exit\n"
+        "\n"
+        "Examples:\n"
+        "  ./analyzer/analyzer --sarif --no-db mc_tests/tests/test16_dangerous_functions.c\n"
+        "  ./analyzer/analyzer --warn-exit --no-db mc_tests/tests/test30_clean_file.c\n"
+        "\n"
+        "Exit status:\n"
+        "  0  on success (or findings without --warn-exit in text/JSON mode)\n"
+        "  1  on errors, or when findings are reported in --warn-exit/--gcc/--sarif modes\n",
+        prog);
+}
+
 /* Simple JSON string escaper for dump-views output */
 static void
 json_escape_string(FILE *out, const char *s)
@@ -707,7 +736,11 @@ main(int argc, char **argv)
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
 
-        if (strcmp(arg, "--json") == 0) {
+        if (strcmp(arg, "--help") == 0 || strcmp(arg, "-h") == 0) {
+            print_help(argv[0]);
+            free(files);
+            return 0;
+        } else if (strcmp(arg, "--json") == 0) {
             json = 1;
         } else if (strcmp(arg, "--sarif") == 0) {
             sarif = 1;

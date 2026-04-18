@@ -1545,6 +1545,106 @@ test_bad_compdb_fails() {
 }
 
 # ----------------------------------------------------------------------
+# Test 22b: --help and -h output
+# ----------------------------------------------------------------------
+test_cli_help() {
+    log_info "=== Test 22b: --help / -h output ==="
+
+    local rc out_help out_h
+    local ex1='./analyzer/analyzer --sarif --no-db mc_tests/tests/test16_dangerous_functions.c'
+    local ex2='./analyzer/analyzer --warn-exit --no-db mc_tests/tests/test30_clean_file.c'
+
+    rc=0
+    out_help="$(cd "$ROOT_DIR" && ./analyzer/analyzer --help 2>&1)" || rc=$?
+    expect_eq "$rc" "0" "cli: --help exits 0"
+
+    if echo "$out_help" | grep -q 'unknown option'; then
+        log_fail "cli: --help regressed to unknown option path"
+        failed=$((failed+1))
+    else
+        log_pass "cli: --help not treated as unknown option"
+        passed=$((passed+1))
+    fi
+
+    rc=0
+    out_h="$(cd "$ROOT_DIR" && ./analyzer/analyzer -h 2>&1)" || rc=$?
+    expect_eq "$rc" "0" "cli: -h exits 0"
+
+    if echo "$out_h" | grep -qE 'failed on .*-h($|[^-])'; then
+        log_fail "cli: -h was treated as input file"
+        failed=$((failed+1))
+    else
+        log_pass "cli: -h not treated as input file"
+        passed=$((passed+1))
+    fi
+
+    if [ "$out_help" = "$out_h" ]; then
+        log_pass "cli: --help and -h produce identical output"
+        passed=$((passed+1))
+    else
+        log_fail "cli: --help and -h output differs"
+        failed=$((failed+1))
+    fi
+
+    for name in "--sarif" "--gcc" "--warn-exit" "--suppressions PATH" "--compile-commands PATH"; do
+        if echo "$out_help" | grep -qF -- "$name"; then
+            log_pass "cli: help output contains '$name'"
+            passed=$((passed+1))
+        else
+            log_fail "cli: help output missing '$name'"
+            failed=$((failed+1))
+        fi
+    done
+
+    # Synopsis uses the invoked program name (argv[0]) and ends with the
+    # file-list marker — pattern-matched so additions/renames of flags
+    # don't silently stale-bind the test to an incomplete usage string.
+    if echo "$out_help" | grep -qE '^Usage: \./analyzer/analyzer .*<c-file> \[c-file\.\.\.\]$'; then
+        log_pass "cli: help synopsis line reflects argv[0] and file-list tail"
+        passed=$((passed+1))
+    else
+        log_fail "cli: help synopsis line malformed"
+        failed=$((failed+1))
+    fi
+
+    if echo "$out_help" | grep -qF -- "$ex1"; then
+        log_pass "cli: help output contains sarif example command"
+        passed=$((passed+1))
+    else
+        log_fail "cli: help output missing sarif example command"
+        failed=$((failed+1))
+    fi
+
+    if echo "$out_help" | grep -qF -- "$ex2"; then
+        log_pass "cli: help output contains warn-exit example command"
+        passed=$((passed+1))
+    else
+        log_fail "cli: help output missing warn-exit example command"
+        failed=$((failed+1))
+    fi
+
+    if echo "$out_help" | grep -qi 'exit status'; then
+        log_pass "cli: help output contains exit-status note"
+        passed=$((passed+1))
+    else
+        log_fail "cli: help output missing exit-status note"
+        failed=$((failed+1))
+    fi
+
+    rc=0
+    local out_none
+    out_none="$("$ANALYZER_BIN" 2>&1)" || rc=$?
+    expect_eq "$rc" "1" "cli: no operands exits 1"
+    if echo "$out_none" | grep -q '^Usage:'; then
+        log_pass "cli: no operands prints Usage: line"
+        passed=$((passed+1))
+    else
+        log_fail "cli: no operands missing Usage: line"
+        failed=$((failed+1))
+    fi
+}
+
+# ----------------------------------------------------------------------
 # Test 23: CLI error-path integration tests
 # ----------------------------------------------------------------------
 test_cli_error_paths() {
@@ -1683,6 +1783,7 @@ main() {
     test_preprocess_compile_cmd_std
     test_analyzer_compile_commands_integration
     test_bad_compdb_fails
+    test_cli_help
     test_cli_error_paths
     test_gcc_stream_split
 
