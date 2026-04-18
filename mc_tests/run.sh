@@ -1553,6 +1553,37 @@ test_analyzer_compile_commands_per_file_std() {
 }
 
 # ----------------------------------------------------------------------
+# Test 21c: compile_commands -D changes analyzer warnings end-to-end
+# ----------------------------------------------------------------------
+test_analyzer_compile_commands_macro_e2e() {
+    log_info "=== Test 21c: compile_commands -D affects analyzer output ==="
+
+    local compdb="${ROOT_DIR}/mc_tests/fixtures/preproc_cli_compdb/compile_commands.json"
+    local src="mc_tests/fixtures/preproc_cli_compdb/preproc_cli_compdb_macro_e2e.c"
+    local out_no_compdb out_with_compdb
+
+    out_no_compdb="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --no-db "$src" 2>&1)" || true
+
+    if echo "$out_no_compdb" | grep -q 'preproc_cli_compdb_macro_e2e\.c:.*warning: use of dangerous function gets()'; then
+        log_fail "compile_commands -D e2e: no-compdb run should not report gets()"
+        failed=$((failed+1))
+    else
+        log_pass "compile_commands -D e2e: no-compdb run produces no gets() warning"
+        passed=$((passed+1))
+    fi
+
+    out_with_compdb="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --no-db --compile-commands "$compdb" "$src" 2>&1)" || true
+
+    if echo "$out_with_compdb" | grep -q 'preproc_cli_compdb_macro_e2e\.c:.*warning: use of dangerous function gets()'; then
+        log_pass "compile_commands -D e2e: compdb run reports gets() warning"
+        passed=$((passed+1))
+    else
+        log_fail "compile_commands -D e2e: compdb run missing gets() warning (got: $out_with_compdb)"
+        failed=$((failed+1))
+    fi
+}
+
+# ----------------------------------------------------------------------
 # Test 22: Bad compile_commands entry fails loudly
 # ----------------------------------------------------------------------
 test_bad_compdb_fails() {
@@ -1814,6 +1845,7 @@ main() {
     test_preprocess_compile_cmd_std
     test_analyzer_compile_commands_integration
     test_analyzer_compile_commands_per_file_std
+    test_analyzer_compile_commands_macro_e2e
     test_bad_compdb_fails
     test_cli_help
     test_cli_error_paths

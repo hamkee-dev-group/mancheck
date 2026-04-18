@@ -21,5 +21,15 @@
       "gnu2x",
       "preproc_cli_compdb_std.c"
     ]
+  },
+  {
+    "directory": ".",
+    "file": "preproc_cli_compdb_macro_e2e.c",
+    "arguments": [
+      "clang",
+      "-c",
+      "-DMANCHECK_COMPILE_DB_FLAG=1",
+      "preproc_cli_compdb_macro_e2e.c"
+    ]
   }
 ]
