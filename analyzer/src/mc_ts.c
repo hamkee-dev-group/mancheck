@@ -628,6 +628,33 @@ is_var_checked_in_block(const mc_ts_file *f, TSNode store_stmt,
                 if (subtree_has_ident(f, inner, varname, vlen))
                     return true;
             }
+            /* check_*(var); — direct call to a check_-prefixed helper */
+            if (!ts_node_is_null(inner) &&
+                strcmp(ts_node_type(inner), "call_expression") == 0) {
+                TSNode fn = ts_node_child_by_field_name(
+                    inner, "function", (uint32_t)strlen("function"));
+                if (!ts_node_is_null(fn) &&
+                    strcmp(ts_node_type(fn), "identifier") == 0) {
+                    char fname[64];
+                    mc_ts_node_text_copy(f, fn, fname, sizeof fname);
+                    if (strncmp(fname, "check_", 6) == 0) {
+                        TSNode args = ts_node_child_by_field_name(
+                            inner, "arguments", (uint32_t)strlen("arguments"));
+                        if (!ts_node_is_null(args)) {
+                            uint32_t ac = ts_node_named_child_count(args);
+                            for (uint32_t j = 0; j < ac; j++) {
+                                TSNode arg = ts_node_named_child(args, j);
+                                if (strcmp(ts_node_type(arg), "identifier") != 0)
+                                    continue;
+                                char aname[64];
+                                mc_ts_node_text_copy(f, arg, aname, sizeof aname);
+                                if (strcmp(aname, varname) == 0)
+                                    return true;
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 

@@ -10,3 +10,9 @@ int main(void) {
     my_read(fd, buf, sizeof buf);
     return 0;
 }
+static void check_fd(int fd) { if (fd < 0) return; }
+
+void test_checked_store_helper(void) {
+    int dupfd = dup(0);
+    check_fd(dupfd);
+}
