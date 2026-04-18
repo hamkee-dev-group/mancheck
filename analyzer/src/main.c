@@ -307,6 +307,14 @@ main(int argc, char **argv)
                 return 1;
             }
             compile_commands_path = argv[++i];
+        } else if (strcmp(arg, "--compdb") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "%s: --compdb requires a path argument\n",
+                        argv[0]);
+                free(files);
+                return 1;
+            }
+            compile_commands_path = argv[++i];
         } else if (strcmp(arg, "--dump-views") == 0) {
             if (i + 1 >= argc) {
                 fprintf(stderr, "%s: --dump-views requires a path argument\n",

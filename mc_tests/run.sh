@@ -1688,6 +1688,45 @@ test_analyzer_compile_commands_include_e2e() {
 }
 
 # ----------------------------------------------------------------------
+# Test 21f: --compdb alias populates compile_cmd like --compile-commands
+# ----------------------------------------------------------------------
+test_analyzer_compdb_alias() {
+    log_info "=== Test 21f: --compdb alias ==="
+
+    local compdb="${ROOT_DIR}/mc_tests/fixtures/compile_commands.json"
+    local src="mc_tests/fixtures/preproc_compdb_fixture.c"
+    local views_compdb="${OUT_DIR}/compdb_alias_on.jsonl"
+    local views_plain="${OUT_DIR}/compdb_alias_off.jsonl"
+
+    rm -f "$views_compdb" "$views_plain"
+
+    (
+        cd "$ROOT_DIR"
+        "$ANALYZER_BIN" --no-db --compdb "$compdb" \
+            --dump-views "$views_compdb" "$src" >/dev/null 2>&1
+    ) || true
+
+    (
+        cd "$ROOT_DIR"
+        "$ANALYZER_BIN" --no-db --dump-views "$views_plain" "$src" >/dev/null 2>&1
+    ) || true
+
+    if [ ! -s "$views_compdb" ] || [ ! -s "$views_plain" ]; then
+        log_fail "--compdb alias: dump-views output missing"
+        failed=$((failed+1))
+        return
+    fi
+
+    if cmp -s "$views_compdb" "$views_plain"; then
+        log_fail "--compdb alias: output identical with and without --compdb"
+        failed=$((failed+1))
+    else
+        log_pass "--compdb alias: output differs from no-compdb invocation"
+        passed=$((passed+1))
+    fi
+}
+
+# ----------------------------------------------------------------------
 # Test 22: Bad compile_commands entry fails loudly
 # ----------------------------------------------------------------------
 test_bad_compdb_fails() {
@@ -1855,6 +1894,18 @@ test_cli_error_paths() {
         failed=$((failed+1))
     fi
 
+    # --compdb missing argument
+    rc=0
+    out="$("$ANALYZER_BIN" --compdb 2>&1)" || rc=$?
+    expect_eq "$rc" "1" "cli: --compdb missing arg exits 1"
+    if echo "$out" | grep -q -- '--compdb requires a path argument'; then
+        log_pass "cli: --compdb missing arg error message"
+        passed=$((passed+1))
+    else
+        log_fail "cli: --compdb missing arg error message"
+        failed=$((failed+1))
+    fi
+
     # --dump-views missing argument
     rc=0
     out="$("$ANALYZER_BIN" --dump-views 2>&1)" || rc=$?
@@ -1952,6 +2003,7 @@ main() {
     test_analyzer_compile_commands_per_file_std
     test_analyzer_compile_commands_macro_e2e
     test_analyzer_compile_commands_include_e2e
+    test_analyzer_compdb_alias
     test_bad_compdb_fails
     test_cli_help
     test_cli_error_paths
