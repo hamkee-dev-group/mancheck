@@ -1633,10 +1633,67 @@ test_analyzer_compile_commands_macro_e2e() {
 }
 
 # ----------------------------------------------------------------------
-# Test 21e: compile_commands -I resolves header end-to-end
+# Test 21e: command-form compile_commands affects dumped views
+# ----------------------------------------------------------------------
+test_analyzer_compile_commands_command_dump_views() {
+    log_info "=== Test 21e: command-form compile_commands affects dump-views ==="
+
+    local compdb="${ROOT_DIR}/mc_tests/fixtures/preproc_cli_compdb_command/compile_commands.json"
+    local src="mc_tests/fixtures/preproc_cli_compdb/preproc_cli_compdb_macro.c"
+    local views_on="${OUT_DIR}/compdb_command_views_on.jsonl"
+    local views_off="${OUT_DIR}/compdb_command_views_off.jsonl"
+    local pp_on pp_off
+
+    rm -f "$views_on" "$views_off"
+
+    (
+        cd "$ROOT_DIR"
+        "$ANALYZER_BIN" --no-db --compile-commands "$compdb" \
+            --dump-views "$views_on" "$src" >/dev/null 2>&1
+    ) || true
+
+    (
+        cd "$ROOT_DIR"
+        "$ANALYZER_BIN" --no-db --dump-views "$views_off" "$src" >/dev/null 2>&1
+    ) || true
+
+    if [ ! -s "$views_on" ]; then
+        log_fail "command-form compile_commands: compdb dump-views output missing"
+        failed=$((failed+1))
+        return
+    fi
+    if [ ! -s "$views_off" ]; then
+        log_fail "command-form compile_commands: no-compdb dump-views output missing"
+        failed=$((failed+1))
+        return
+    fi
+
+    pp_on="$(grep -F 'preproc_cli_compdb_macro.c' "$views_on" | sed -n 's/.*"pp_user":"\(.*\)"}/\1/p')"
+    if echo "$pp_on" | grep -Fq 'compile-cmd-macro' &&
+       echo "$pp_on" | grep -Fq 'compile-cmd-include'; then
+        log_pass "command-form compile_commands expands -D and quoted -I in dump-views"
+        passed=$((passed+1))
+    else
+        log_fail "command-form compile_commands missing expected expansion (got: $pp_on)"
+        failed=$((failed+1))
+    fi
+
+    pp_off="$(grep -F 'preproc_cli_compdb_macro.c' "$views_off" | sed -n 's/.*"pp_user":"\(.*\)"}/\1/p')"
+    if echo "$pp_off" | grep -Fq 'compile-cmd-macro-missing' &&
+       ! echo "$pp_off" | grep -Fq 'compile-cmd-include'; then
+        log_pass "command-form compile_commands control run stays distinguishable"
+        passed=$((passed+1))
+    else
+        log_fail "command-form compile_commands control run unexpectedly matched compdb expansion (got: $pp_off)"
+        failed=$((failed+1))
+    fi
+}
+
+# ----------------------------------------------------------------------
+# Test 21f: compile_commands -I resolves header end-to-end
 # ----------------------------------------------------------------------
 test_analyzer_compile_commands_include_e2e() {
-    log_info "=== Test 21e: compile_commands -I resolves header ==="
+    log_info "=== Test 21f: compile_commands -I resolves header ==="
 
     local compdb="${ROOT_DIR}/mc_tests/fixtures/compile_commands.json"
     local src="mc_tests/fixtures/preproc_compdb_fixture.c"
@@ -2002,6 +2059,7 @@ main() {
     test_analyzer_compile_commands_integration
     test_analyzer_compile_commands_per_file_std
     test_analyzer_compile_commands_macro_e2e
+    test_analyzer_compile_commands_command_dump_views
     test_analyzer_compile_commands_include_e2e
     test_analyzer_compdb_alias
     test_bad_compdb_fails
