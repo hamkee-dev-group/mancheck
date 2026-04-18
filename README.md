@@ -92,7 +92,11 @@ analyzer [options] <file.c> [file.c ...]
 | `--specdb PATH` | Load manpage database for extended rule coverage |
 | `--db PATH` | Write run results to a SQLite database (default: `mancheck.db`) |
 | `--no-db` | Disable the run database entirely |
-| `--json` | Output results as JSON instead of text |
+| `--json` | Emit JSON diagnostics |
+| `--sarif` | Emit SARIF diagnostics |
+| `--gcc` | Emit GCC-compatible diagnostic format |
+| `--warn-exit` | Exit non-zero when findings are reported |
+| `--suppressions PATH` | Load suppression rules from PATH |
 | `--dump-views PATH` | Dump internal preprocessing views as JSONL (for debugging) |
 
 ### Examples
@@ -106,6 +110,18 @@ analyzer [options] <file.c> [file.c ...]
 
 # JSON output for tooling
 ./analyzer/analyzer --json --no-db --specdb specdb/data/spec.db src/*.c
+
+# SARIF output (e.g. for code-scanning integrations)
+./analyzer/analyzer --sarif --no-db src/*.c > results.sarif
+
+# GCC-compatible format (editors/IDEs that parse gcc diagnostics)
+./analyzer/analyzer --gcc --no-db src/*.c
+
+# CI exit-code mode: non-zero exit when findings are reported
+./analyzer/analyzer --warn-exit --no-db src/*.c
+
+# Load external suppression rules
+./analyzer/analyzer --suppressions mancheck.suppress --no-db src/*.c
 ```
 
 ## How rules work
