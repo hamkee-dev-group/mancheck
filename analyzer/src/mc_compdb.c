@@ -120,6 +120,21 @@ mc_resolve_path(const char *base, const char *path)
 }
 
 static char *
+mc_normalize_lookup_path(const char *path)
+{
+    char *resolved;
+
+    if (!path)
+        return NULL;
+
+    resolved = realpath(path, NULL);
+    if (resolved)
+        return resolved;
+
+    return strdup(path);
+}
+
+static char *
 mc_join_shell_quoted_argv(char **argv, size_t argc)
 {
     size_t len = 1;
@@ -540,17 +555,26 @@ fail:
 const struct mc_compile_db_entry *
 mc_find_compile_db_entry(const struct mc_compile_db *db, const char *abs_path)
 {
+    char *lookup_path;
+    const struct mc_compile_db_entry *match = NULL;
+
     if (!db || !abs_path)
+        return NULL;
+
+    lookup_path = mc_normalize_lookup_path(abs_path);
+    if (!lookup_path)
         return NULL;
 
     for (size_t i = 0; i < db->count; i++) {
         if (db->entries[i].resolved_file &&
-            strcmp(db->entries[i].resolved_file, abs_path) == 0) {
-            return &db->entries[i];
+            strcmp(db->entries[i].resolved_file, lookup_path) == 0) {
+            match = &db->entries[i];
+            break;
         }
     }
 
-    return NULL;
+    free(lookup_path);
+    return match;
 }
 
 const char *

@@ -1475,9 +1475,27 @@ test_compdb_lookup_command_strings() {
     local args_compdb="${ROOT_DIR}/mc_tests/fixtures/preproc_cli_compdb/compile_commands.json"
     local cmd_compdb="${ROOT_DIR}/mc_tests/fixtures/preproc_cli_compdb_command/compile_commands.json"
     local src="${ROOT_DIR}/mc_tests/fixtures/preproc_cli_compdb/preproc_cli_compdb_macro.c"
-    local args_out cmd_out
+    local canon_src="${ROOT_DIR}/mc_tests/fixtures/preproc_cli_compdb/../preproc_cli_compdb/preproc_cli_compdb_macro.c"
+    local missing_compdb="${OUT_DIR}/compdb_lookup_missing.json"
+    local missing_src="${ROOT_DIR}/mc_tests/fixtures/preproc_cli_compdb/compdb_lookup_missing.c"
+    local args_out cmd_out canon_out missing_out
 
     rm -f "$helper_bin"
+
+    cat >"$missing_compdb" <<EOF
+[
+  {
+    "directory": "${ROOT_DIR}/mc_tests/fixtures/preproc_cli_compdb",
+    "file": "compdb_lookup_missing.c",
+    "arguments": [
+      "clang",
+      "-c",
+      "-DMISSING_LOOKUP=1",
+      "compdb_lookup_missing.c"
+    ]
+  }
+]
+EOF
 
     run_cmd clang -std=c11 -Wall -Wextra -Wpedantic \
         -I"${ROOT_DIR}/analyzer/src" \
@@ -1487,6 +1505,8 @@ test_compdb_lookup_command_strings() {
 
     args_out="$("$helper_bin" "$args_compdb" "$src" 2>&1)" || true
     cmd_out="$("$helper_bin" "$cmd_compdb" "$src" 2>&1)" || true
+    canon_out="$("$helper_bin" "$args_compdb" "$canon_src" 2>&1)" || true
+    missing_out="$("$helper_bin" "$missing_compdb" "$missing_src" 2>&1)" || true
 
     if echo "$args_out" | grep -Fq "command='clang' '-c' '-I' 'include dir' '-DMANCHECK_COMPILE_DB_FLAG=1' 'preproc_cli_compdb_macro.c'"; then
         log_pass "compdb lookup: arguments-form entry synthesizes shell-safe command"
@@ -1509,6 +1529,22 @@ test_compdb_lookup_command_strings() {
         passed=$((passed+1))
     else
         log_fail "compdb lookup: command-form entry missing command (got: $cmd_out)"
+        failed=$((failed+1))
+    fi
+
+    if echo "$canon_out" | grep -Fq "command='clang' '-c' '-I' 'include dir' '-DMANCHECK_COMPILE_DB_FLAG=1' 'preproc_cli_compdb_macro.c'"; then
+        log_pass "compdb lookup: existing-file lookup matches via canonical path"
+        passed=$((passed+1))
+    else
+        log_fail "compdb lookup: canonical existing-file lookup failed (got: $canon_out)"
+        failed=$((failed+1))
+    fi
+
+    if echo "$missing_out" | grep -Fq "command='clang' '-c' '-DMISSING_LOOKUP=1' 'compdb_lookup_missing.c'"; then
+        log_pass "compdb lookup: non-existent file preserves absolute-path fallback"
+        passed=$((passed+1))
+    else
+        log_fail "compdb lookup: non-existent file fallback failed (got: $missing_out)"
         failed=$((failed+1))
     fi
 }
