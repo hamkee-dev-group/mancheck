@@ -1,0 +1,12 @@
+[
+  {
+    "directory": "../..",
+    "file": "mc_tests/fixtures/preproc_compdb_fixture.c",
+    "arguments": [
+      "clang",
+      "-c",
+      "-Imc_tests/fixtures/preproc_compdb_include",
+      "mc_tests/fixtures/preproc_compdb_fixture.c"
+    ]
+  }
+]

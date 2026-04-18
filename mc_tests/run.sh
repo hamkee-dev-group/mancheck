@@ -1633,6 +1633,61 @@ test_analyzer_compile_commands_macro_e2e() {
 }
 
 # ----------------------------------------------------------------------
+# Test 21e: compile_commands -I resolves header end-to-end
+# ----------------------------------------------------------------------
+test_analyzer_compile_commands_include_e2e() {
+    log_info "=== Test 21e: compile_commands -I resolves header ==="
+
+    local compdb="${ROOT_DIR}/mc_tests/fixtures/compile_commands.json"
+    local src="mc_tests/fixtures/preproc_compdb_fixture.c"
+    local views_on="${OUT_DIR}/compdb_include_on.jsonl"
+    local views_off="${OUT_DIR}/compdb_include_off.jsonl"
+
+    rm -f "$views_on" "$views_off"
+
+    (
+        cd "$ROOT_DIR"
+        "$ANALYZER_BIN" --no-db --compile-commands "$compdb" \
+            --dump-views "$views_on" "$src" >/dev/null 2>&1
+    ) || true
+
+    (
+        cd "$ROOT_DIR"
+        "$ANALYZER_BIN" --no-db --dump-views "$views_off" "$src" >/dev/null 2>&1
+    ) || true
+
+    if [ ! -s "$views_on" ]; then
+        log_fail "compile_commands -I e2e: compdb dump-views output missing"
+        failed=$((failed+1))
+        return
+    fi
+    if [ ! -s "$views_off" ]; then
+        log_fail "compile_commands -I e2e: no-compdb dump-views output missing"
+        failed=$((failed+1))
+        return
+    fi
+
+    # The raw/min fields never contain the expanded marker "compile-cmd-include"
+    # (that literal only lives in preproc_compdb_header.h), so a substring
+    # match on the whole JSONL record reliably reflects pp_user's content.
+    if grep -Fq 'compile-cmd-include' "$views_on"; then
+        log_pass "compile_commands -I e2e: pp_user contains expanded marker"
+        passed=$((passed+1))
+    else
+        log_fail "compile_commands -I e2e: pp_user missing expanded marker"
+        failed=$((failed+1))
+    fi
+
+    if grep -Fq 'compile-cmd-include' "$views_off"; then
+        log_fail "compile_commands -I e2e: no-compdb pp_user should not contain expanded marker"
+        failed=$((failed+1))
+    else
+        log_pass "compile_commands -I e2e: no-compdb pp_user lacks expanded marker"
+        passed=$((passed+1))
+    fi
+}
+
+# ----------------------------------------------------------------------
 # Test 22: Bad compile_commands entry fails loudly
 # ----------------------------------------------------------------------
 test_bad_compdb_fails() {
@@ -1896,6 +1951,7 @@ main() {
     test_analyzer_compile_commands_integration
     test_analyzer_compile_commands_per_file_std
     test_analyzer_compile_commands_macro_e2e
+    test_analyzer_compile_commands_include_e2e
     test_bad_compdb_fails
     test_cli_help
     test_cli_error_paths
