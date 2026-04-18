@@ -1139,6 +1139,36 @@ test_warn_exit() {
 }
 
 # ----------------------------------------------------------------------
+# Test 16c: --warn-exit interaction with --suppressions
+# ----------------------------------------------------------------------
+test_warn_exit_suppression() {
+    log_info "=== Test 16c: --warn-exit + --suppressions ==="
+
+    # (1) Partial suppression: dangerous_function finding remains → exit 1
+    local rc=0
+    (cd "$ROOT_DIR" && "$ANALYZER_BIN" --warn-exit --no-db \
+        --suppressions mc_tests/tests/test35_suppression.sup \
+        mc_tests/tests/test35_suppression.c >/dev/null 2>&1) || rc=$?
+    expect_eq "$rc" "1" "--warn-exit + partial suppression: exit 1 (unsuppressed gets() remains)"
+
+    # (2) All categories suppressed for the only input file → exit 0
+    rc=0
+    (cd "$ROOT_DIR" && "$ANALYZER_BIN" --warn-exit --no-db \
+        --suppressions mc_tests/tests/test01_all_suppressed.sup \
+        mc_tests/tests/test01_simple_unchecked.c >/dev/null 2>&1) || rc=$?
+    expect_eq "$rc" "0" "--warn-exit + full suppression: exit 0 (no remaining findings)"
+
+    # (3) Mixed inputs: one file fully suppressed, the other still has
+    #     unsuppressed findings → exit 1
+    rc=0
+    (cd "$ROOT_DIR" && "$ANALYZER_BIN" --warn-exit --no-db \
+        --suppressions mc_tests/tests/test01_all_suppressed.sup \
+        mc_tests/tests/test01_simple_unchecked.c \
+        mc_tests/tests/test35_suppression.c >/dev/null 2>&1) || rc=$?
+    expect_eq "$rc" "1" "--warn-exit + mixed files: exit 1 (suppressed file silent, other still has findings)"
+}
+
+# ----------------------------------------------------------------------
 # Test 16b: GCC and SARIF modes exit 1 on findings by default
 # ----------------------------------------------------------------------
 test_gcc_sarif_default_exit() {
@@ -1644,6 +1674,7 @@ main() {
     test_inline_suppress_same_line_scope
     test_sarif_output
     test_warn_exit
+    test_warn_exit_suppression
     test_gcc_sarif_default_exit
     test_finding_pipeline_extra_checks
     test_json_issue_count
