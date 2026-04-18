@@ -1465,10 +1465,59 @@ test_preprocess_compile_cmd_std() {
 }
 
 # ----------------------------------------------------------------------
-# Test 21: analyzer CLI compile_commands integration
+# Test 21: compile_commands lookup returns command strings
+# ----------------------------------------------------------------------
+test_compdb_lookup_command_strings() {
+    log_info "=== Test 21: compile_commands lookup command strings ==="
+
+    local helper_src="${ROOT_DIR}/mc_tests/helpers/compdb_lookup_helper.c"
+    local helper_bin="${OUT_DIR}/compdb_lookup_helper"
+    local args_compdb="${ROOT_DIR}/mc_tests/fixtures/preproc_cli_compdb/compile_commands.json"
+    local cmd_compdb="${ROOT_DIR}/mc_tests/fixtures/preproc_cli_compdb_command/compile_commands.json"
+    local src="${ROOT_DIR}/mc_tests/fixtures/preproc_cli_compdb/preproc_cli_compdb_macro.c"
+    local args_out cmd_out
+
+    rm -f "$helper_bin"
+
+    run_cmd clang -std=c11 -Wall -Wextra -Wpedantic \
+        -I"${ROOT_DIR}/analyzer/src" \
+        -o "$helper_bin" \
+        "$helper_src" \
+        "${ROOT_DIR}/analyzer/src/mc_compdb.c"
+
+    args_out="$("$helper_bin" "$args_compdb" "$src" 2>&1)" || true
+    cmd_out="$("$helper_bin" "$cmd_compdb" "$src" 2>&1)" || true
+
+    if echo "$args_out" | grep -Fq "command='clang' '-c' '-I' 'include dir' '-DMANCHECK_COMPILE_DB_FLAG=1' 'preproc_cli_compdb_macro.c'"; then
+        log_pass "compdb lookup: arguments-form entry synthesizes shell-safe command"
+        passed=$((passed+1))
+    else
+        log_fail "compdb lookup: arguments-form entry missing synthesized command (got: $args_out)"
+        failed=$((failed+1))
+    fi
+
+    if echo "$args_out" | grep -Fq 'argv[3]=include dir'; then
+        log_pass "compdb lookup: arguments-form entry preserves argv boundaries"
+        passed=$((passed+1))
+    else
+        log_fail "compdb lookup: arguments-form argv regression (got: $args_out)"
+        failed=$((failed+1))
+    fi
+
+    if echo "$cmd_out" | grep -Fq 'command=clang -c -I "include dir" -DMANCHECK_COMPILE_DB_FLAG=1 preproc_cli_compdb_macro.c'; then
+        log_pass "compdb lookup: command-form entry returns stored command"
+        passed=$((passed+1))
+    else
+        log_fail "compdb lookup: command-form entry missing command (got: $cmd_out)"
+        failed=$((failed+1))
+    fi
+}
+
+# ----------------------------------------------------------------------
+# Test 21b: analyzer CLI compile_commands integration
 # ----------------------------------------------------------------------
 test_analyzer_compile_commands_integration() {
-    log_info "=== Test 21: analyzer --compile-commands integration ==="
+    log_info "=== Test 21b: analyzer --compile-commands integration ==="
 
     local compdb="${ROOT_DIR}/mc_tests/fixtures/preproc_cli_compdb/compile_commands.json"
     local macro_src="mc_tests/fixtures/preproc_cli_compdb/preproc_cli_compdb_macro.c"
@@ -1522,10 +1571,10 @@ test_analyzer_compile_commands_integration() {
 }
 
 # ----------------------------------------------------------------------
-# Test 21b: per-file -std from compile_commands affects analyzer output
+# Test 21c: per-file -std from compile_commands affects analyzer output
 # ----------------------------------------------------------------------
 test_analyzer_compile_commands_per_file_std() {
-    log_info "=== Test 21b: per-file -std from compile_commands ==="
+    log_info "=== Test 21c: per-file -std from compile_commands ==="
 
     local compdb="${ROOT_DIR}/mc_tests/fixtures/per_file_std_compdb/compile_commands.json"
     local c11_src="mc_tests/fixtures/per_file_std_compdb/c11_file.c"
@@ -1553,10 +1602,10 @@ test_analyzer_compile_commands_per_file_std() {
 }
 
 # ----------------------------------------------------------------------
-# Test 21c: compile_commands -D changes analyzer warnings end-to-end
+# Test 21d: compile_commands -D changes analyzer warnings end-to-end
 # ----------------------------------------------------------------------
 test_analyzer_compile_commands_macro_e2e() {
-    log_info "=== Test 21c: compile_commands -D affects analyzer output ==="
+    log_info "=== Test 21d: compile_commands -D affects analyzer output ==="
 
     local compdb="${ROOT_DIR}/mc_tests/fixtures/preproc_cli_compdb/compile_commands.json"
     local src="mc_tests/fixtures/preproc_cli_compdb/preproc_cli_compdb_macro_e2e.c"
@@ -1843,6 +1892,7 @@ main() {
     test_json_diagnostics
     test_db_extra_check_facts
     test_preprocess_compile_cmd_std
+    test_compdb_lookup_command_strings
     test_analyzer_compile_commands_integration
     test_analyzer_compile_commands_per_file_std
     test_analyzer_compile_commands_macro_e2e
