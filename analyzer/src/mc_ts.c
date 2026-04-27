@@ -1407,7 +1407,30 @@ static void mc_extra_check_function_body(const mc_ts_file *f,
     unsigned sp = 0;
     stack[sp++] = body;
 
+    /*
+     * Pending clears for assignment_expression LHS identifiers.  The
+     * clear must run AFTER the RHS subtree has been analyzed (so a
+     * `fd = close(fd)` after a prior close still reports double_close)
+     * and BEFORE any sibling of the assignment is processed.  We record
+     * the sp value at the moment the assignment is popped; once sp
+     * returns to that level all of the assignment's descendants have
+     * been processed, and we apply the clear.
+     */
+    struct { char var[64]; unsigned boundary; } pending[64];
+    unsigned pc = 0;
+
     while (sp > 0) {
+        while (pc > 0 && pending[pc - 1].boundary >= sp) {
+            const char *vname = pending[pc - 1].var;
+            for (size_t i = 0; i < MC_MAX_CLOSED_VARS; i++) {
+                if (closed[i].used &&
+                    strcmp(closed[i].var, vname) == 0) {
+                    closed[i].used = 0;
+                }
+            }
+            pc--;
+        }
+
         TSNode node = stack[--sp];
         const char *type = ts_node_type(node);
 
@@ -1416,6 +1439,20 @@ static void mc_extra_check_function_body(const mc_ts_file *f,
                                              closed, MC_MAX_CLOSED_VARS,
                                              sink, userdata);
             mc_extra_check_env_call(f, node, sink, userdata);
+        } else if (strcmp(type, "assignment_expression") == 0) {
+            TSNode lhs = ts_node_child_by_field_name(
+                node, "left", (uint32_t)strlen("left"));
+            if (!ts_node_is_null(lhs) &&
+                strcmp(ts_node_type(lhs), "identifier") == 0 &&
+                pc < sizeof pending / sizeof pending[0]) {
+                mc_ts_identifier_name(f, lhs,
+                                      pending[pc].var,
+                                      sizeof pending[pc].var);
+                if (pending[pc].var[0] != '\0') {
+                    pending[pc].boundary = sp;
+                    pc++;
+                }
+            }
         } else if (strcmp(type, "declaration") == 0) {
             mc_extra_check_declaration_malloc_mismatch(f, node,
                                                        sink, userdata);

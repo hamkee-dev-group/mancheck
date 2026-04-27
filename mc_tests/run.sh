@@ -605,11 +605,11 @@ test_gcc_stream_split() {
     fi
 
     err_lines="$(wc -l < "$tmperr")"
-    expect_eq "$err_lines" "4" "gcc-split double_close: stderr has 4 lines"
+    expect_eq "$err_lines" "10" "gcc-split double_close: stderr has 10 lines"
 
     local close_count
     close_count="$(grep -c 'ignored return of close()' "$tmperr" || true)"
-    expect_eq "$close_count" "2" "gcc-split double_close: 2 ignored-return-of-close diagnostics"
+    expect_eq "$close_count" "4" "gcc-split double_close: 4 ignored-return-of-close diagnostics"
 
     local dc_count
     dc_count="$(grep -c 'double_close:' "$tmperr" || true)"
@@ -1243,7 +1243,7 @@ test_finding_pipeline_extra_checks() {
 
     expect_eq "$retval_env" "1" "pipeline: env_usage.c retval finding coexists"
     expect_eq "$retval_malloc" "4" "pipeline: malloc_bad.c retval findings coexist"
-    expect_eq "$retval_dc" "2" "pipeline: double_close.c retval findings coexist"
+    expect_eq "$retval_dc" "4" "pipeline: double_close.c retval findings coexist"
 }
 
 # Test 18: JSON issue_count includes extra-check diagnostics
@@ -1251,7 +1251,7 @@ test_finding_pipeline_extra_checks() {
 test_json_issue_count() {
     log_info "=== Test 18: JSON issue_count parity with text mode ==="
 
-    # double_close.c text mode: 2 unchecked-return + 2 double_close = 4
+    # double_close.c text mode: 4 unchecked-return + 4 stored-but-unchecked + 2 double_close = 10
     local json_dc
     json_dc="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --json --no-db mc_tests/tests/double_close.c 2>/dev/null)" || true
 
@@ -1265,7 +1265,7 @@ test_json_issue_count() {
 
     local ic_dc
     ic_dc="$(echo "$json_dc" | grep -o '"issue_count":[0-9]*' | head -1 | grep -o '[0-9]*$')"
-    expect_eq "$ic_dc" "4" "JSON issue_count for double_close.c matches text-mode total"
+    expect_eq "$ic_dc" "10" "JSON issue_count for double_close.c matches text-mode total"
 
     # malloc_bad.c text mode: 4 retval + 2 malloc_size_mismatch = 6
     local json_mb
@@ -1369,7 +1369,7 @@ test_db_extra_check_facts() {
     mb_retval="$(sqlite3 "$db" "SELECT COUNT(*) FROM facts WHERE run_id=$run_id_mb AND kind='return_value_check';")"
     expect_eq "$mb_retval" "4" "malloc_bad.c: 4 return_value_check facts"
 
-    # --- double_close.c: 2 double_close + 2 retval_unchecked = 4 ---
+    # --- double_close.c: 2 double_close + 4 retval_unchecked + 4 return_value_check = 10 ---
     (cd "$ROOT_DIR" && "$ANALYZER_BIN" --db "$db" mc_tests/tests/double_close.c >/dev/null 2>&1) || true
 
     local run_id_dc
@@ -1377,7 +1377,7 @@ test_db_extra_check_facts() {
 
     local ec_dc
     ec_dc="$(sqlite3 "$db" "SELECT error_count FROM runs WHERE id=$run_id_dc;")"
-    expect_eq "$ec_dc" "4" "double_close.c: error_count=4"
+    expect_eq "$ec_dc" "10" "double_close.c: error_count=10"
 
     local dc_facts
     dc_facts="$(sqlite3 "$db" "SELECT COUNT(*) FROM facts WHERE run_id=$run_id_dc AND kind='double_close';")"
@@ -1385,7 +1385,7 @@ test_db_extra_check_facts() {
 
     local dc_retval
     dc_retval="$(sqlite3 "$db" "SELECT COUNT(*) FROM facts WHERE run_id=$run_id_dc AND kind='retval_unchecked';")"
-    expect_eq "$dc_retval" "2" "double_close.c: 2 retval_unchecked facts"
+    expect_eq "$dc_retval" "4" "double_close.c: 4 retval_unchecked facts"
 
     # --- Suppression: insecure_env_usage suppressed for env_usage.c ---
     local sdb="${ROOT_DIR}/mc_tests/extra_facts_sup.db"
@@ -1426,7 +1426,7 @@ test_db_extra_check_facts() {
 
     local sec_dc
     sec_dc="$(sqlite3 "$sdb" "SELECT error_count FROM runs WHERE id=$sid_dc;")"
-    expect_eq "$sec_dc" "2" "suppressed double_close.c: error_count=2 (only retval)"
+    expect_eq "$sec_dc" "8" "suppressed double_close.c: error_count=8 (only retval)"
 
     local sdc_facts
     sdc_facts="$(sqlite3 "$sdb" "SELECT COUNT(*) FROM facts WHERE run_id=$sid_dc AND kind='double_close';")"
