@@ -1,0 +1,2 @@
+tests/double_close_goto_cleanup.c:6:9: ignored return of close(): unchecked return value of close()
+tests/double_close_goto_cleanup.c:9:5: ignored return of close(): unchecked return value of close()

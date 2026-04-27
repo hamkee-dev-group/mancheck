@@ -1161,6 +1161,74 @@ static bool mc_is_exit_call(const mc_ts_file *f, TSNode stmt)
     return false;
 }
 
+/* Exact text equality of two node spans, compared directly against the
+ * source buffer (no truncation, no fixed-size copy). */
+static bool mc_node_text_eq(const mc_ts_file *f, TSNode a, TSNode b)
+{
+    uint32_t asb = ts_node_start_byte(a), aeb = ts_node_end_byte(a);
+    uint32_t bsb = ts_node_start_byte(b), beb = ts_node_end_byte(b);
+    if (aeb > f->source_len) aeb = (uint32_t)f->source_len;
+    if (beb > f->source_len) beb = (uint32_t)f->source_len;
+    if (asb >= aeb || bsb >= beb)
+        return false;
+    if ((aeb - asb) != (beb - bsb))
+        return false;
+    return memcmp(f->source + asb, f->source + bsb, aeb - asb) == 0;
+}
+
+/*
+ * Search the subtree rooted at root for a labeled_statement whose label
+ * text equals label_id's text and whose immediate body is a direct
+ * return_statement or a direct exit-call expression_statement.  Used to
+ * recognize cleanup labels like `out: return;` so that
+ * `close(fd); goto out;` is treated as terminal.  Traversal uses a
+ * tree-sitter cursor so depth is bounded by the tree itself rather
+ * than a fixed-size stack.
+ */
+static bool mc_labeled_target_is_terminal(const mc_ts_file *f,
+                                          TSNode root,
+                                          TSNode label_id)
+{
+    if (ts_node_is_null(root) || ts_node_is_null(label_id))
+        return false;
+
+    TSTreeCursor cursor = ts_tree_cursor_new(root);
+    bool result = false;
+    bool advanced = ts_tree_cursor_goto_first_child(&cursor);
+
+    while (advanced) {
+        TSNode node = ts_tree_cursor_current_node(&cursor);
+        if (strcmp(ts_node_type(node), "labeled_statement") == 0) {
+            TSNode lab = ts_node_child_by_field_name(
+                node, "label", (uint32_t)strlen("label"));
+            if (!ts_node_is_null(lab) &&
+                mc_node_text_eq(f, lab, label_id)) {
+                uint32_t nc = ts_node_named_child_count(node);
+                if (nc >= 2) {
+                    TSNode body = ts_node_named_child(node, 1);
+                    const char *bt = ts_node_type(body);
+                    if (strcmp(bt, "return_statement") == 0 ||
+                        mc_is_exit_call(f, body))
+                        result = true;
+                }
+                break;
+            }
+        }
+
+        if (ts_tree_cursor_goto_first_child(&cursor))
+            continue;
+        while (!ts_tree_cursor_goto_next_sibling(&cursor)) {
+            if (!ts_tree_cursor_goto_parent(&cursor)) {
+                advanced = false;
+                break;
+            }
+        }
+    }
+
+    ts_tree_cursor_delete(&cursor);
+    return result;
+}
+
 static bool mc_is_terminal_close(const mc_ts_file *f, TSNode call)
 {
     /* Walk up to the expression_statement containing this call. */
@@ -1176,6 +1244,20 @@ static bool mc_is_terminal_close(const mc_ts_file *f, TSNode call)
     TSNode parent = ts_node_parent(stmt);
     if (ts_node_is_null(parent))
         return false;
+
+    /* Locate the enclosing function body so we can resolve goto labels. */
+    TSNode func_body = mc_ts_null_node();
+    {
+        TSNode w = stmt;
+        while (!ts_node_is_null(w)) {
+            if (strcmp(ts_node_type(w), "function_definition") == 0) {
+                func_body = ts_node_child_by_field_name(
+                    w, "body", (uint32_t)strlen("body"));
+                break;
+            }
+            w = ts_node_parent(w);
+        }
+    }
 
     /*
      * Check if any remaining sibling in this block is a return or exit.
@@ -1200,6 +1282,19 @@ static bool mc_is_terminal_close(const mc_ts_file *f, TSNode call)
             return true;
         if (mc_is_exit_call(f, child))
             return true;
+        /*
+         * `goto LABEL;` where LABEL is a cleanup label whose immediate
+         * body is `return ...;` or an exit call also terminates the
+         * current path.
+         */
+        if (strcmp(ntype, "goto_statement") == 0 &&
+            !ts_node_is_null(func_body)) {
+            TSNode lab = ts_node_child_by_field_name(
+                child, "label", (uint32_t)strlen("label"));
+            if (!ts_node_is_null(lab) &&
+                mc_labeled_target_is_terminal(f, func_body, lab))
+                return true;
+        }
     }
     return false;
 }
