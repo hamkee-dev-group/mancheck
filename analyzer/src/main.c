@@ -390,6 +390,13 @@ main(int argc, char **argv)
             free(files);
             return 1;
         }
+    } else if (access(".mancheckrc", R_OK) == 0) {
+        if (mc_suppress_load(".mancheckrc") != 0) {
+            fprintf(stderr, "error: cannot load suppressions file '.mancheckrc'\n");
+            mc_db_ctx_close(&dbctx);
+            free(files);
+            return 1;
+        }
     }
 
     /* Optional: open dump-views JSONL file */

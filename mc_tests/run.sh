@@ -844,6 +844,81 @@ test_suppressions_glob() {
 }
 
 # ----------------------------------------------------------------------
+# Test 14c: autoload .mancheckrc from CWD when --suppressions absent
+# ----------------------------------------------------------------------
+test_suppressions_autoload() {
+    log_info "=== Test 14c: autoload .mancheckrc from CWD ==="
+
+    local rc_file="${OUT_DIR}/.mancheckrc"
+    printf '# auto-load flat config\n../tests/test35_suppression.c return_value_check\n' \
+        > "$rc_file"
+
+    local out_text
+    out_text="$(cd "$OUT_DIR" && "$ANALYZER_BIN" --no-db ../tests/test35_suppression.c 2>&1)" || true
+
+    local count_text
+    count_text="$(echo "$out_text" | grep -c ':' || true)"
+    expect_eq "$count_text" "1" "autoload .mancheckrc: exactly 1 diagnostic"
+
+    if echo "$out_text" | grep -q 'gets()'; then
+        log_pass "autoload .mancheckrc: gets() still reported"
+        passed=$((passed+1))
+    else
+        log_fail "autoload .mancheckrc: gets() missing"
+        failed=$((failed+1))
+    fi
+
+    if echo "$out_text" | grep -q 'read()'; then
+        log_fail "autoload .mancheckrc: read() should be suppressed"
+        failed=$((failed+1))
+    else
+        log_pass "autoload .mancheckrc: read() suppressed"
+        passed=$((passed+1))
+    fi
+
+    local out_json
+    out_json="$(cd "$OUT_DIR" && "$ANALYZER_BIN" --json --no-db ../tests/test35_suppression.c 2>/dev/null)" || true
+
+    if echo "$out_json" | grep -q '"function":"gets"'; then
+        log_pass "autoload .mancheckrc JSON: gets present"
+        passed=$((passed+1))
+    else
+        log_fail "autoload .mancheckrc JSON: gets missing"
+        failed=$((failed+1))
+    fi
+
+    if echo "$out_json" | grep -q '"function":"read"'; then
+        log_fail "autoload .mancheckrc JSON: read should be suppressed"
+        failed=$((failed+1))
+    else
+        log_pass "autoload .mancheckrc JSON: read absent"
+        passed=$((passed+1))
+    fi
+
+    local json_issue_count
+    json_issue_count="$(echo "$out_json" | grep -o '"issue_count":[0-9]*' | head -n1 | cut -d: -f2)"
+    expect_eq "$json_issue_count" "1" "autoload .mancheckrc JSON: issue_count is 1"
+
+    local autorc_db="${OUT_DIR}/autorc.db"
+    rm -f "$autorc_db"
+    (cd "$OUT_DIR" && "$ANALYZER_BIN" --db "$autorc_db" ../tests/test35_suppression.c >/dev/null 2>&1) || true
+
+    local db_err
+    db_err="$(sqlite3 "$autorc_db" "SELECT error_count FROM runs ORDER BY rowid DESC LIMIT 1;" 2>/dev/null || echo "")"
+    expect_eq "$db_err" "1" "autoload .mancheckrc DB: error_count is 1"
+
+    local db_facts_count
+    db_facts_count="$(sqlite3 "$autorc_db" "SELECT COUNT(*) FROM facts WHERE run_id=(SELECT id FROM runs ORDER BY rowid DESC LIMIT 1);" 2>/dev/null || echo "")"
+    expect_eq "$db_facts_count" "1" "autoload .mancheckrc DB: exactly 1 facts row"
+
+    local db_facts_row
+    db_facts_row="$(sqlite3 "$autorc_db" "SELECT kind || '|' || symbol FROM facts WHERE run_id=(SELECT id FROM runs ORDER BY rowid DESC LIMIT 1);" 2>/dev/null || echo "")"
+    expect_eq "$db_facts_row" "dangerous_function|gets" "autoload .mancheckrc DB: only fact is dangerous_function/gets"
+
+    rm -f "$autorc_db" "$rc_file"
+}
+
+# ----------------------------------------------------------------------
 # Test 15: Inline mc:ignore / NOLINT(mancheck)
 # ----------------------------------------------------------------------
 test_inline_suppress() {
@@ -2174,6 +2249,7 @@ main() {
     test_gcc_format_double_close
     test_suppressions
     test_suppressions_glob
+    test_suppressions_autoload
     test_inline_suppress
     test_inline_suppress_comment_only_chain
     test_inline_suppress_nolint_next_warn
