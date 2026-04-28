@@ -749,6 +749,101 @@ test_suppressions() {
 }
 
 # ----------------------------------------------------------------------
+# Test 14b: --suppressions glob path matching
+# ----------------------------------------------------------------------
+test_suppressions_glob() {
+    log_info "=== Test 14b: --suppressions glob path matching ==="
+
+    local sup="mc_tests/tests/.tmp_glob.sup"
+    printf '# glob path suppression\ntest35_* return_value_check\n' \
+        > "${ROOT_DIR}/${sup}"
+
+    # test35: gets() (dangerous) remains, read() (return_value_check) suppressed.
+    local out_t35
+    out_t35="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --no-db --suppressions "$sup" mc_tests/tests/test35_suppression.c 2>&1)" || true
+
+    local count_t35
+    count_t35="$(echo "$out_t35" | grep -c ':' || true)"
+    expect_eq "$count_t35" "1" "glob suppress: exactly 1 diagnostic on test35"
+
+    if echo "$out_t35" | grep -q 'dangerous function gets()'; then
+        log_pass "glob suppress: dangerous gets() still reported"
+        passed=$((passed+1))
+    else
+        log_fail "glob suppress: dangerous gets() missing"
+        failed=$((failed+1))
+    fi
+
+    if echo "$out_t35" | grep -q 'read()'; then
+        log_fail "glob suppress: read() should be suppressed by test35_* glob"
+        failed=$((failed+1))
+    else
+        log_pass "glob suppress: read() suppressed by test35_* glob"
+        passed=$((passed+1))
+    fi
+
+    # test01 must NOT be matched by test35_* glob — both read() and write()
+    # should still report.
+    local out_t01
+    out_t01="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --no-db --suppressions "$sup" mc_tests/tests/test01_simple_unchecked.c 2>&1)" || true
+
+    if echo "$out_t01" | grep -q 'read()'; then
+        log_pass "glob suppress: test01 read() still reports (no over-match)"
+        passed=$((passed+1))
+    else
+        log_fail "glob suppress: test01 read() incorrectly suppressed"
+        failed=$((failed+1))
+    fi
+
+    if echo "$out_t01" | grep -q 'write()'; then
+        log_pass "glob suppress: test01 write() still reports (no over-match)"
+        passed=$((passed+1))
+    else
+        log_fail "glob suppress: test01 write() incorrectly suppressed"
+        failed=$((failed+1))
+    fi
+
+    # JSON mode: gets present, read absent, issue_count is 1.
+    local out_json
+    out_json="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --json --no-db --suppressions "$sup" mc_tests/tests/test35_suppression.c 2>/dev/null)" || true
+
+    if echo "$out_json" | grep -q '"function":"gets"'; then
+        log_pass "glob suppress JSON: gets present"
+        passed=$((passed+1))
+    else
+        log_fail "glob suppress JSON: gets missing"
+        failed=$((failed+1))
+    fi
+
+    if echo "$out_json" | grep -q '"function":"read"'; then
+        log_fail "glob suppress JSON: read should be suppressed"
+        failed=$((failed+1))
+    else
+        log_pass "glob suppress JSON: read absent"
+        passed=$((passed+1))
+    fi
+
+    local json_issue_count
+    json_issue_count="$(echo "$out_json" | grep -o '"issue_count":[0-9]*' | head -n1 | cut -d: -f2)"
+    expect_eq "$json_issue_count" "1" "glob suppress JSON: issue_count is 1"
+
+    # DB mode: error_count and facts reflect only the unsuppressed gets().
+    local glob_db="${OUT_DIR}/glob.db"
+    rm -f "$glob_db"
+    (cd "$ROOT_DIR" && "$ANALYZER_BIN" --db "$glob_db" --suppressions "$sup" mc_tests/tests/test35_suppression.c >/dev/null 2>&1) || true
+
+    local db_err
+    db_err="$(sqlite3 "$glob_db" "SELECT error_count FROM runs ORDER BY rowid DESC LIMIT 1;" 2>/dev/null || echo "")"
+    expect_eq "$db_err" "1" "glob suppress DB: error_count is 1"
+
+    local db_facts
+    db_facts="$(sqlite3 "$glob_db" "SELECT COUNT(*) FROM facts WHERE run_id=(SELECT id FROM runs ORDER BY rowid DESC LIMIT 1) AND kind='dangerous_function';" 2>/dev/null || echo "")"
+    expect_eq "$db_facts" "1" "glob suppress DB: 1 dangerous_function fact for the run"
+
+    rm -f "$glob_db" "${ROOT_DIR}/${sup}"
+}
+
+# ----------------------------------------------------------------------
 # Test 15: Inline mc:ignore / NOLINT(mancheck)
 # ----------------------------------------------------------------------
 test_inline_suppress() {
@@ -2078,6 +2173,7 @@ main() {
     test_gcc_format_mixed
     test_gcc_format_double_close
     test_suppressions
+    test_suppressions_glob
     test_inline_suppress
     test_inline_suppress_comment_only_chain
     test_inline_suppress_nolint_next_warn

@@ -3,19 +3,21 @@
 #include <string.h>
 #include <libgen.h>
 #include <limits.h>
+#include <fnmatch.h>
 
 #include "mc_suppress.h"
 
 struct mc_suppress_rule {
-    char *path;     /* canonical (realpath) */
+    char *path;     /* canonical (realpath) for exact rules, or glob pattern */
     char *category;
+    int   is_glob;
 };
 
 static struct mc_suppress_rule *g_rules;
 static size_t g_rule_count;
 static size_t g_rule_cap;
 
-static int add_rule(const char *resolved, const char *cat)
+static int add_rule(const char *path, const char *cat, int is_glob)
 {
     if (g_rule_count == g_rule_cap) {
         size_t newcap = g_rule_cap ? g_rule_cap * 2 : 8;
@@ -27,8 +29,9 @@ static int add_rule(const char *resolved, const char *cat)
         g_rule_cap = newcap;
     }
 
-    g_rules[g_rule_count].path     = strdup(resolved);
+    g_rules[g_rule_count].path     = strdup(path);
     g_rules[g_rule_count].category = strdup(cat);
+    g_rules[g_rule_count].is_glob  = is_glob;
     if (!g_rules[g_rule_count].path || !g_rules[g_rule_count].category) {
         free(g_rules[g_rule_count].path);
         free(g_rules[g_rule_count].category);
@@ -77,11 +80,20 @@ int mc_suppress_load(const char *path)
         else
             snprintf(joined, sizeof joined, "%s", fpath);
 
+        if (strpbrk(joined, "*?[")) {
+            /* Glob pattern: keep as-is, do not realpath. */
+            if (add_rule(joined, cat, 1) != 0) {
+                rc = -1;
+                break;
+            }
+            continue;
+        }
+
         char resolved[PATH_MAX];
         if (!realpath(joined, resolved))
             continue;
 
-        if (add_rule(resolved, cat) != 0) {
+        if (add_rule(resolved, cat, 0) != 0) {
             rc = -1;
             break;
         }
@@ -103,9 +115,14 @@ int mc_suppress_check(const char *file, const char *category)
         norm = resolved;
 
     for (size_t i = 0; i < g_rule_count; i++) {
-        if (strcmp(g_rules[i].path, norm) == 0 &&
-            strcmp(g_rules[i].category, category) == 0)
+        if (strcmp(g_rules[i].category, category) != 0)
+            continue;
+        if (g_rules[i].is_glob) {
+            if (fnmatch(g_rules[i].path, norm, FNM_PATHNAME) == 0)
+                return 1;
+        } else if (strcmp(g_rules[i].path, norm) == 0) {
             return 1;
+        }
     }
     return 0;
 }
