@@ -7,6 +7,8 @@
 #include <errno.h>
 #include <ctype.h>
 #include <sqlite3.h>
+#include <unistd.h>
+#include <sys/wait.h>
 #include "specdb.h"
 
 struct parsed_section {
@@ -52,80 +54,56 @@ static char *xstrdup(const char *s)
     return p;
 }
 
-static char *read_command_output(const char *fmt, ...)
+/* Execute argv directly: manpage names and sections are data, never shell code. */
+static char *read_command_output(char *const argv[])
 {
-    char cmd[1024];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(cmd, sizeof(cmd), fmt, ap);
-    va_end(ap);
-
-    /* Capture both stdout and stderr, we'll filter "warning:" lines out */
-    char full_cmd[1200];
-    snprintf(full_cmd, sizeof(full_cmd), "%s 2>&1", cmd);
-
-    FILE *fp = popen(full_cmd, "r");
-    if (!fp) die("popen failed: %s", strerror(errno));
-
-    /* First read raw output */
-    size_t cap = 16384;
-    size_t len = 0;
+    int fds[2];
+    if (pipe(fds) != 0) return NULL;
+    pid_t pid = fork();
+    if (pid < 0) { close(fds[0]); close(fds[1]); return NULL; }
+    if (!pid) {
+        close(fds[0]);
+        if (dup2(fds[1], STDOUT_FILENO) < 0) _exit(127);
+        close(fds[1]);
+        setenv("LC_ALL", "C", 1);
+        setenv("MANWIDTH", "1000", 1);
+        setenv("MANPAGER", "cat", 1);
+        setenv("GROFF_NO_SGR", "1", 1);
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    close(fds[1]);
+    size_t cap = 16384, len = 0;
     char *buf = malloc(cap);
-    if (!buf) die("malloc failed");
-
-    size_t n;
-    while ((n = fread(buf + len, 1, cap - len, fp)) > 0) {
-        len += n;
-        if (len == cap) {
+    int failed = !buf;
+    while (!failed) {
+        if (len + 4096 + 1 > cap) {
             cap *= 2;
             char *tmp = realloc(buf, cap);
-            if (!tmp) die("realloc failed");
+            if (!tmp) { failed = 1; break; }
             buf = tmp;
         }
+        ssize_t n = read(fds[0], buf + len, cap - len - 1);
+        if (n > 0) len += (size_t)n;
+        else if (n == 0) break;
+        else if (errno != EINTR) { failed = 1; break; }
     }
-    buf[len] = '\0';
-
-    int status = pclose(fp);
-    if (status == -1) {
-        fprintf(stderr, "warning: pclose failed for cmd: %s\n", full_cmd);
+    close(fds[0]);
+    int status = 0;
+    pid_t waited;
+    do { waited = waitpid(pid, &status, 0); } while (waited < 0 && errno == EINTR);
+    if (failed || waited < 0 || !WIFEXITED(status) || WEXITSTATUS(status)) {
+        free(buf);
+        return NULL;
     }
-
-    /* Now filter out any lines starting with "warning:" */
-    char *filtered = malloc(len + 1);
-    if (!filtered) die("malloc failed");
-    size_t out_len = 0;
-
-    const char *p = buf;
-    const char *end = buf + len;
-    while (p < end) {
-        const char *line_start = p;
-        while (p < end && *p != '\n') p++;
-        const char *line_end = p;
-        if (p < end && *p == '\n') p++;
-
-        size_t line_len = (size_t)(line_end - line_start);
-
-        /* check if line begins with "warning:" (ignoring leading spaces) */
-        const char *t = line_start;
-        while (t < line_end && (*t == ' ' || *t == '\t')) t++;
-        int is_warning_line = 0;
-        if ((size_t)(line_end - t) >= 8 &&
-            strncmp(t, "warning:", 8) == 0) {
-            is_warning_line = 1;
-        }
-
-        if (!is_warning_line) {
-            memcpy(filtered + out_len, line_start, line_len);
-            out_len += line_len;
-            if (p <= end) {
-                filtered[out_len++] = '\n';
-            }
-        }
+    /* Remove roff overstrikes without appending an artificial final newline. */
+    size_t out = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (buf[i] == '\b') { if (out && buf[out - 1] != '\n') out--; }
+        else buf[out++] = buf[i];
     }
-
-    filtered[out_len] = '\0';
-    free(buf);
-    return filtered;
+    buf[out] = '\0';
+    return buf;
 }
 
 /* trim leading/trailing spaces/newlines */
@@ -198,7 +176,7 @@ static void parse_sections(const char *txt, struct parsed_manpage *pm)
             /* New header */
             if (cur_name) {
                 /* Close previous section */
-                if (pm->n_sections == cap) {
+                if ((size_t)pm->n_sections == cap) {
                     cap = cap ? cap * 2 : 8;
                     struct parsed_section *tmp =
                         realloc(secs, (size_t)cap * sizeof(*tmp));
@@ -223,7 +201,7 @@ static void parse_sections(const char *txt, struct parsed_manpage *pm)
 
     /* close last section if any */
     if (cur_name) {
-        if (pm->n_sections == cap) {
+        if ((size_t)pm->n_sections == cap) {
             cap = cap ? cap * 2 : 8;
             struct parsed_section *tmp =
                 realloc(secs, (size_t)cap * sizeof(*tmp));
@@ -286,7 +264,7 @@ static void extract_name_meta(struct parsed_manpage *pm)
 }
 
 /* Extract SYNOPSIS-based metadata (header + first prototype). */
-static void extract_synopsis_meta(struct parsed_manpage *pm)
+static void extract_synopsis_meta(struct parsed_manpage *pm, const char *name)
 {
     pm->header = NULL;
     pm->proto  = NULL;
@@ -315,23 +293,15 @@ static void extract_synopsis_meta(struct parsed_manpage *pm)
             size_t len = (size_t)(t_end - t_start);
             if (len == 0) continue;
 
-            /* First, look for include */
-            if (!pm->header && strstr(t_start, "#include") != NULL) {
-                const char *lt = strchr(t_start, '<');
-                const char *gt = strchr(t_start, '>');
-                if (lt && gt && gt > lt) {
-                    pm->header = trim_new(lt, gt + 1);
-                } else {
-                    /* fallback: whole line */
-                    pm->header = trim_new(t_start, t_end);
-                }
-            }
-
-            /* Then, look for a prototype line (very heuristic) */
-            if (!pm->proto && strchr(t_start, '(') && strchr(t_start, ')')) {
-                pm->proto = trim_new(t_start, t_end);
+            if (!pm->header && len >= 8 && !strncmp(t_start, "#include", 8)) {
+                const char *lt = memchr(t_start, '<', len);
+                const char *gt = memchr(t_start, '>', len);
+                if (lt && gt && gt > lt) pm->header = trim_new(lt, gt + 1);
             }
         }
+        char proto[4096];
+        if (specdb_extract_prototype(s->content, name, proto, sizeof proto) == 1)
+            pm->proto = xstrdup(proto);
         break; /* only first SYNOPSIS */
     }
 }
@@ -581,16 +551,11 @@ static int enumerate_manpages(const char *section_filter,
     *out_arr = NULL;
     *out_n   = 0;
 
-    char *out = NULL;
-    if (section_filter) {
-        out = read_command_output("man -k . %s", section_filter);
-    } else {
-        out = read_command_output("man -k .");
-    }
-    if (!out || out[0] == '\0') {
-        free(out);
-        return 0;
-    }
+    char *argv_filtered[] = {"man", "-k", "-s", (char *)section_filter, ".", NULL};
+    char *argv_all[] = {"man", "-k", ".", NULL};
+    char *out = read_command_output(section_filter ? argv_filtered : argv_all);
+    if (!out) return -1;
+    if (!out[0]) { free(out); return 0; }
 
     struct name_section *arr = NULL;
     int n = 0, cap = 0;
@@ -684,11 +649,12 @@ static int index_one(sqlite3 *db,
                      const char *name,
                      const char *section)
 {
-    char *man_txt = read_command_output("man %s %s | col -b", section, name);
+    char *argv[] = {"man", "-P", "cat", "--", (char *)section, (char *)name, NULL};
+    char *man_txt = read_command_output(argv);
     if (!man_txt || man_txt[0] == '\0') {
         fprintf(stderr, "warning: empty man output for %s(%s)\n", name, section);
         free(man_txt);
-        return 0; /* not fatal */
+        return -1;
     }
 
     struct parsed_manpage pm;
@@ -697,32 +663,26 @@ static int index_one(sqlite3 *db,
 
     parse_sections(pm.raw, &pm);
     extract_name_meta(&pm);
-    extract_synopsis_meta(&pm);
+    extract_synopsis_meta(&pm, name);
+    if (!pm.short_name || !pm.n_sections) {
+        fprintf(stderr, "error: invalid manpage for %s(%s)\n", name, section);
+        parsed_manpage_free(&pm);
+        return -1;
+    }
 
     char man_source[64];
     snprintf(man_source, sizeof(man_source), "man %s %s", section, name);
 
     int func_id = -1;
-    if (upsert_function(db, name, section, &pm, man_source, &func_id) != 0) {
-        fprintf(stderr, "error: failed to upsert %s(%s)\n", name, section);
-        parsed_manpage_free(&pm);
-        return -1;
-    }
-
-    if (replace_sections(db, func_id, &pm) != 0) {
-        fprintf(stderr, "error: failed to store sections for %s(%s)\n", name, section);
-        parsed_manpage_free(&pm);
-        return -1;
-    }
-
-    if (replace_aliases(db, func_id, name, &pm) != 0) {
-        fprintf(stderr, "error: failed to store aliases for %s(%s)\n", name, section);
-        parsed_manpage_free(&pm);
-        return -1;
-    }
-
+    int ok = sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK;
+    if (!ok) { parsed_manpage_free(&pm); return -1; }
+    ok = upsert_function(db, name, section, &pm, man_source, &func_id) == 0 &&
+         replace_sections(db, func_id, &pm) == 0 &&
+         replace_aliases(db, func_id, name, &pm) == 0;
+    if (ok) ok = sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK;
+    if (!ok) sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
     parsed_manpage_free(&pm);
-    return 0;
+    return ok ? 0 : -1;
 }
 
 /* ---------------- CLI ---------------- */

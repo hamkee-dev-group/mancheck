@@ -3,6 +3,8 @@ tests/test34_stored_unchecked.c:9:5: ignored return of read(): unchecked return 
 tests/test34_stored_unchecked.c:10:5: ignored return of close(): unchecked return value of close()
 tests/test34_stored_unchecked.c:17:5: ignored return of read(): unchecked return value of read()
 tests/test34_stored_unchecked.c:18:5: ignored return of close(): unchecked return value of close()
+tests/test34_stored_unchecked.c:22:15: resource acquired by fopen() can reach a function exit without release or ownership transfer
 tests/test34_stored_unchecked.c:22:15: stored but unchecked return value of fopen()
+tests/test34_stored_unchecked.c:27:15: resource acquired by malloc() can reach a function exit without release or ownership transfer
 tests/test34_stored_unchecked.c:32:15: stored but unchecked return value of malloc()
 tests/test34_stored_unchecked.c:38:9: stored but unchecked return value of malloc()

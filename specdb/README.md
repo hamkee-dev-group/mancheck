@@ -89,9 +89,16 @@ if (specdb_lookup_function(db, "read", "2", &func) == 0) {
     specdb_free_function(&func);
 }
 
-// Quick check: does this function have a RETURN VALUE section?
-if (specdb_function_has_retval(db, "mmap") == 1)
-    printf("mmap has documented return value\n");
+// A heading alone is not a failure contract.
+struct specdb_contract contract;
+if (specdb_lookup_contract(db, "mmap", &contract) == 1) {
+    printf("%s\n", contract.prototype);
+    printf("evidence: %s\n", contract.evidence);
+}
+
+// Reviewed semantics are available even without a manpage database.
+specdb_builtin_contract("mmap", &contract);
+// contract.failure == SPECDB_FAILURE_MAP_FAILED
 
 specdb_close(db);
 ```
@@ -102,11 +109,22 @@ specdb_close(db);
 specdb/
   src/
     specdb.c       # library (schema + queries)
+    contracts.c    # signature/prose extraction and reviewed API contracts
     specdb.h       # public API header
     man2db.c       # specdb-build CLI
   include/
-    specdb.h       # installed header (copy of src/specdb.h)
+    specdb.h       # development forwarding header; install copies src/specdb.h
   data/
     spec.db        # pre-built manpage database
   Makefile
 ```
+
+The analyzer uses `specdb_open_readonly`, which rejects missing, empty and
+incompatible databases without creating files. `specdb_open` remains the
+schema-creating API for builders. Page refreshes are transactional. The builder
+runs `man` with an argv array and rejects failed or malformed command output.
+
+Contract extraction is conservative: a complete matching declaration is needed;
+void functions are infallible; only attributed failure prose is interpreted.
+Shared-page references and historical descriptions are not general API rules.
+Unknown contracts do not acquire a must-check rule merely from a section heading.

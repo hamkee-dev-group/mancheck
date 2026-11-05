@@ -6,13 +6,22 @@
 
 #include <sqlite3.h>
 
+/*
+ * Schema versions (PRAGMA user_version):
+ *   0  empty database, or one written before versioning (runs/facts/FTS only)
+ *   1  adds runs.status: 'started' | 'completed' | 'failed'
+ */
+#define MC_DB_SCHEMA_VERSION 1
+
+/* Every statement is idempotent so an interrupted or legacy schema can be
+ * completed inside the same transaction that sets the version. */
 static const char *mc_db_schema_sql =
-    "PRAGMA foreign_keys = ON;\n"
     "CREATE TABLE IF NOT EXISTS runs (\n"
     "  id INTEGER PRIMARY KEY AUTOINCREMENT,\n"
     "  filename TEXT NOT NULL,\n"
     "  ts DATETIME DEFAULT CURRENT_TIMESTAMP,\n"
-    "  error_count INTEGER DEFAULT 0\n"
+    "  error_count INTEGER DEFAULT 0,\n"
+    "  status TEXT NOT NULL DEFAULT 'started'\n"
     ");\n"
     "CREATE TABLE IF NOT EXISTS facts (\n"
     "  id INTEGER PRIMARY KEY AUTOINCREMENT,\n"
@@ -96,23 +105,75 @@ void mc_db_close(mc_db *m)
     m->db = NULL;
 }
 
-static int mc_db_table_exists(mc_db *m, const char *name)
+static int mc_db_exec(mc_db *m, const char *sql, const char *what)
 {
-    const char *sql =
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1 LIMIT 1;";
+    char *errmsg = NULL;
+    int rc = sqlite3_exec(m->db, sql, NULL, NULL, &errmsg);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "mc_db_init_schema: %s failed: %s\n",
+                what, errmsg ? errmsg : sqlite3_errmsg(m->db));
+    }
+    sqlite3_free(errmsg);
+    return rc;
+}
+
+static int mc_db_query_int(mc_db *m, const char *sql, const char *arg, int *out)
+{
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(m->db, sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
-        return 0;
+        return rc;
     }
-
-    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
-
+    if (arg) {
+        sqlite3_bind_text(stmt, 1, arg, -1, SQLITE_STATIC);
+    }
     rc = sqlite3_step(stmt);
-    int exists = (rc == SQLITE_ROW);
-
+    if (rc == SQLITE_ROW) {
+        *out = sqlite3_column_int(stmt, 0);
+        rc = SQLITE_OK;
+    } else if (rc == SQLITE_DONE) {
+        *out = 0;
+        rc = SQLITE_OK;
+    }
     sqlite3_finalize(stmt);
-    return exists;
+    return rc;
+}
+
+/* 1 if table has the column, 0 if not, -1 on query failure. */
+static int mc_db_has_column(mc_db *m, const char *table, const char *column)
+{
+    char sql[128];
+    snprintf(sql, sizeof(sql),
+             "SELECT 1 FROM pragma_table_info('%s') WHERE name=?1;", table);
+    int found = 0;
+    if (mc_db_query_int(m, sql, column, &found) != SQLITE_OK) {
+        return -1;
+    }
+    return found;
+}
+
+/* Existing tables must carry the columns mancheck reads and writes; anything
+ * else is a different application's database and must not be modified. */
+static int mc_db_check_columns(mc_db *m, const char *table,
+                               const char *const *columns)
+{
+    int exists = 0;
+    if (mc_db_query_int(m, "SELECT count(*) FROM sqlite_master "
+                           "WHERE type='table' AND name=?1;",
+                        table, &exists) != SQLITE_OK) {
+        return SQLITE_ERROR;
+    }
+    if (!exists) {
+        return SQLITE_OK;
+    }
+    for (const char *const *c = columns; *c; c++) {
+        if (mc_db_has_column(m, table, *c) != 1) {
+            fprintf(stderr, "mc_db_init_schema: table '%s' has no column '%s'; "
+                            "not a mancheck results database\n", table, *c);
+            return SQLITE_ERROR;
+        }
+    }
+    return SQLITE_OK;
 }
 
 int mc_db_init_schema(mc_db *m)
@@ -121,18 +182,68 @@ int mc_db_init_schema(mc_db *m)
         return SQLITE_MISUSE;
     }
 
-    /* If 'runs' already exists, assume schema is in place */
-    if (mc_db_table_exists(m, "runs")) {
-        return SQLITE_OK;
+    static const char *const run_cols[] = { "id", "filename", "ts", "error_count", NULL };
+    static const char *const fact_cols[] = { "id", "run_id", "kind", "symbol", "line", "details", NULL };
+
+    /* IMMEDIATE: concurrent analyzers serialize here instead of racing to
+     * create or migrate the same schema. */
+    int rc = mc_db_exec(m, "BEGIN IMMEDIATE;", "begin");
+    if (rc != SQLITE_OK) {
+        return rc;
     }
 
-    char *errmsg = NULL;
-    int rc = sqlite3_exec(m->db, mc_db_schema_sql, NULL, NULL, &errmsg);
+    int version = 0;
+    rc = mc_db_query_int(m, "PRAGMA user_version;", NULL, &version);
     if (rc != SQLITE_OK) {
-        fprintf(stderr, "mc_db_init_schema: failed: %s\n",
-                errmsg ? errmsg : "(unknown)");
-        sqlite3_free(errmsg);
+        goto fail;
     }
+    if (version > MC_DB_SCHEMA_VERSION) {
+        fprintf(stderr, "mc_db_init_schema: database schema version %d is newer "
+                        "than supported version %d\n", version, MC_DB_SCHEMA_VERSION);
+        rc = SQLITE_ERROR;
+        goto fail;
+    }
+
+    rc = mc_db_check_columns(m, "runs", run_cols);
+    if (rc == SQLITE_OK) {
+        rc = mc_db_check_columns(m, "facts", fact_cols);
+    }
+    if (rc != SQLITE_OK) {
+        goto fail;
+    }
+
+    rc = mc_db_exec(m, mc_db_schema_sql, "create schema");
+    if (rc != SQLITE_OK) {
+        goto fail;
+    }
+
+    int has_status = mc_db_has_column(m, "runs", "status");
+    if (has_status < 0) {
+        rc = SQLITE_ERROR;
+        goto fail;
+    }
+    if (!has_status) {
+        /* Version 0 runs predate run state; their outcome is unknown. */
+        rc = mc_db_exec(m, "ALTER TABLE runs ADD COLUMN status TEXT NOT NULL DEFAULT 'started';",
+                        "add runs.status");
+        if (rc != SQLITE_OK) {
+            goto fail;
+        }
+    }
+
+    if (version != MC_DB_SCHEMA_VERSION) {
+        char sql[64];
+        snprintf(sql, sizeof(sql), "PRAGMA user_version=%d;", MC_DB_SCHEMA_VERSION);
+        rc = mc_db_exec(m, sql, "set schema version");
+        if (rc != SQLITE_OK) {
+            goto fail;
+        }
+    }
+
+    return mc_db_exec(m, "COMMIT;", "commit");
+
+fail:
+    sqlite3_exec(m->db, "ROLLBACK;", NULL, NULL, NULL);
     return rc;
 }
 
@@ -169,13 +280,13 @@ int mc_db_begin_run(mc_db *m, const char *filename, long *run_id)
     return SQLITE_OK;
 }
 
-int mc_db_end_run(mc_db *m, long run_id, int error_count)
+int mc_db_end_run(mc_db *m, long run_id, int error_count, int completed)
 {
     if (!m || !m->db || run_id <= 0) {
         return SQLITE_MISUSE;
     }
 
-    const char *sql = "UPDATE runs SET error_count=?1 WHERE id=?2;";
+    const char *sql = "UPDATE runs SET error_count=?1, status=?3 WHERE id=?2;";
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(m->db, sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
@@ -186,8 +297,14 @@ int mc_db_end_run(mc_db *m, long run_id, int error_count)
 
     sqlite3_bind_int(stmt, 1, error_count);
     sqlite3_bind_int64(stmt, 2, (sqlite3_int64)run_id);
+    sqlite3_bind_text(stmt, 3, completed ? "completed" : "failed", -1, SQLITE_STATIC);
 
     rc = sqlite3_step(stmt);
+    if (rc == SQLITE_DONE && sqlite3_changes(m->db) != 1) {
+        fprintf(stderr, "mc_db_end_run: run %ld no longer exists\n", run_id);
+        sqlite3_finalize(stmt);
+        return SQLITE_NOTFOUND;
+    }
     if (rc != SQLITE_DONE) {
         fprintf(stderr, "mc_db_end_run: step failed: %s\n",
                 sqlite3_errmsg(m->db));

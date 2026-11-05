@@ -1,2 +1,3 @@
+tests/test07_open_close.c:5:15: resource acquired by open() can reach a function exit without release or ownership transfer
 tests/test07_open_close.c:10:5: ignored return of open(): unchecked return value of open()
 tests/test07_open_close.c:14:9: ignored return of close(): unchecked return value of close()

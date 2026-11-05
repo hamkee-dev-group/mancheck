@@ -2,6 +2,7 @@
 #define SPECDB_H
 
 #include <sqlite3.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -75,6 +76,40 @@ int specdb_function_is_dangerous(sqlite3 *db, const char *name);
  *          -1 = database error
  */
 int specdb_function_has_format_string(sqlite3 *db, const char *name);
+
+/* Evidence-backed contracts. UNKNOWN is deliberately not a must-check rule. */
+enum specdb_failure {
+    SPECDB_FAILURE_UNKNOWN, SPECDB_FAILURE_NONE, SPECDB_FAILURE_NEGATIVE,
+    SPECDB_FAILURE_NULL, SPECDB_FAILURE_MAP_FAILED, SPECDB_FAILURE_NONZERO,
+    SPECDB_FAILURE_STRTOL
+};
+enum specdb_resource {
+    SPECDB_RESOURCE_NONE, SPECDB_RESOURCE_HEAP, SPECDB_RESOURCE_FD,
+    SPECDB_RESOURCE_FILE, SPECDB_RESOURCE_PIPE, SPECDB_RESOURCE_DIR,
+    SPECDB_RESOURCE_MAPPING, SPECDB_RESOURCE_DL
+};
+struct specdb_contract {
+    enum specdb_failure failure;
+    enum specdb_resource acquires;
+    enum specdb_resource releases;
+    int returns_void;
+    int format_index;              /* zero based; -1 if unknown/not a format API */
+    int sets_errno;
+    int dangerous;
+    int truncation_size_index;     /* snprintf-like required-length result; -1 otherwise */
+    char prototype[4096];
+    char evidence[512];
+    char source[128];
+};
+
+/* Extract only the requested declaration, including wrapped prototypes. */
+int specdb_extract_prototype(const char *synopsis, const char *name,
+                             char *out, size_t capacity);
+int specdb_lookup_contract(sqlite3 *db, const char *name, struct specdb_contract *out);
+/* Reviewed C/POSIX baseline, available independently of installed manpages. */
+int specdb_builtin_contract(const char *name, struct specdb_contract *out);
+/* Read-only loading never creates an empty database on a mistyped path. */
+int specdb_open_readonly(const char *path, sqlite3 **out);
 
 #ifdef __cplusplus
 }

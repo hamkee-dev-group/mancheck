@@ -1,0 +1,2 @@
+tests/test21_stored_in_var.c:10:15: resource acquired by malloc() can reach a function exit without release or ownership transfer
+tests/test21_stored_in_var.c:11:15: resource acquired by fopen() can reach a function exit without release or ownership transfer

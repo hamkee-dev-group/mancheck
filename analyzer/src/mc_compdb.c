@@ -246,6 +246,53 @@ mc_json_parse_string(const char *p, char **out)
             case 'n': buf[len++] = '\n'; break;
             case 'r': buf[len++] = '\r'; break;
             case 't': buf[len++] = '\t'; break;
+            case 'u': {
+                unsigned cp = 0;
+                for (int i = 0; i < 4; i++) {
+                    unsigned char c = (unsigned char)*++p;
+                    unsigned d;
+                    if (c >= '0' && c <= '9') d = c - '0';
+                    else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+                    else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+                    else { free(buf); return NULL; }
+                    cp = cp * 16 + d;
+                }
+                if (cp >= 0xd800 && cp <= 0xdbff) {
+                    if (p[1] != '\\' || p[2] != 'u') { free(buf); return NULL; }
+                    p += 2;
+                    unsigned lo = 0;
+                    for (int i = 0; i < 4; i++) {
+                        unsigned char c = (unsigned char)*++p;
+                        unsigned d;
+                        if (c >= '0' && c <= '9') d = c - '0';
+                        else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+                        else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+                        else { free(buf); return NULL; }
+                        lo = lo * 16 + d;
+                    }
+                    if (lo < 0xdc00 || lo > 0xdfff) { free(buf); return NULL; }
+                    cp = 0x10000 + ((cp - 0xd800) << 10) + lo - 0xdc00;
+                } else if (cp >= 0xdc00 && cp <= 0xdfff) {
+                    free(buf); return NULL;
+                }
+                /* Embedded NUL cannot be represented in an argv/path string. */
+                if (!cp) { free(buf); return NULL; }
+                if (cp < 0x80) buf[len++] = (char)cp;
+                else if (cp < 0x800) {
+                    buf[len++] = (char)(0xc0 | (cp >> 6));
+                    buf[len++] = (char)(0x80 | (cp & 63));
+                } else if (cp < 0x10000) {
+                    buf[len++] = (char)(0xe0 | (cp >> 12));
+                    buf[len++] = (char)(0x80 | ((cp >> 6) & 63));
+                    buf[len++] = (char)(0x80 | (cp & 63));
+                } else {
+                    buf[len++] = (char)(0xf0 | (cp >> 18));
+                    buf[len++] = (char)(0x80 | ((cp >> 12) & 63));
+                    buf[len++] = (char)(0x80 | ((cp >> 6) & 63));
+                    buf[len++] = (char)(0x80 | (cp & 63));
+                }
+                break;
+            }
             default:
                 free(buf);
                 return NULL;
@@ -254,6 +301,7 @@ mc_json_parse_string(const char *p, char **out)
             continue;
         }
 
+        if ((unsigned char)*p < 0x20) { free(buf); return NULL; }
         buf[len++] = *p++;
     }
 
@@ -267,73 +315,61 @@ mc_json_parse_string(const char *p, char **out)
     return p + 1;
 }
 
-static const char *
-mc_json_skip_value(const char *p)
+static const char *mc_json_skip_nested(const char *p, unsigned depth)
 {
-    int depth;
-
+    if (depth > 128) return NULL;
     p = mc_json_skip_ws(p);
-
     if (*p == '"') {
         char *tmp = NULL;
         const char *next = mc_json_parse_string(p, &tmp);
-        free(tmp);
-        return next;
+        free(tmp); return next;
     }
-
-    if (*p == '{') {
-        depth = 1;
-        p++;
-        while (*p && depth > 0) {
-            if (*p == '"') {
-                char *tmp = NULL;
-                p = mc_json_parse_string(p, &tmp);
-                free(tmp);
-                if (!p)
-                    return NULL;
-                continue;
+    if (*p == '{' || *p == '[') {
+        int object = *p == '{';
+        char close = object ? '}' : ']';
+        p = mc_json_skip_ws(p + 1);
+        if (*p == close) return p + 1;
+        for (;;) {
+            if (object) {
+                char *key = NULL;
+                p = mc_json_parse_string(p, &key); free(key);
+                if (!p) return NULL;
+                p = mc_json_skip_ws(p);
+                if (*p++ != ':') return NULL;
             }
-            if (*p == '{' || *p == '[')
-                depth++;
-            else if (*p == '}' || *p == ']')
-                depth--;
-            p++;
+            p = mc_json_skip_nested(p, depth + 1);
+            if (!p) return NULL;
+            p = mc_json_skip_ws(p);
+            if (*p == close) return p + 1;
+            if (*p++ != ',') return NULL;
+            p = mc_json_skip_ws(p);
         }
-        return depth == 0 ? p : NULL;
     }
-
-    if (*p == '[') {
-        depth = 1;
-        p++;
-        while (*p && depth > 0) {
-            if (*p == '"') {
-                char *tmp = NULL;
-                p = mc_json_parse_string(p, &tmp);
-                free(tmp);
-                if (!p)
-                    return NULL;
-                continue;
-            }
-            if (*p == '[' || *p == '{')
-                depth++;
-            else if (*p == ']' || *p == '}')
-                depth--;
-            p++;
-        }
-        return depth == 0 ? p : NULL;
+    if (!strncmp(p, "true", 4) || !strncmp(p, "null", 4)) return p + 4;
+    if (!strncmp(p, "false", 5)) return p + 5;
+    if (*p == '-') p++;
+    if (*p == '0') p++;
+    else {
+        if (*p < '1' || *p > '9') return NULL;
+        do { p++; } while (*p >= '0' && *p <= '9');
     }
-
-    while (*p &&
-           *p != ',' &&
-           *p != ']' &&
-           *p != '}' &&
-           *p != ' ' &&
-           *p != '\t' &&
-           *p != '\n' &&
-           *p != '\r')
+    if (*p == '.') {
         p++;
-
+        if (*p < '0' || *p > '9') return NULL;
+        do { p++; } while (*p >= '0' && *p <= '9');
+    }
+    if (*p == 'e' || *p == 'E') {
+        p++;
+        if (*p == '+' || *p == '-') p++;
+        if (*p < '0' || *p > '9') return NULL;
+        do { p++; } while (*p >= '0' && *p <= '9');
+    }
     return p;
+}
+
+static const char *mc_json_skip_value(const char *p)
+{
+    return mc_json_skip_nested(p, 0);
 }
 
 static const char *
@@ -431,6 +467,7 @@ mc_load_compile_db(const char *path, struct mc_compile_db *db)
 
     p = mc_json_skip_ws(p + 1);
     if (*p == ']') {
+        if (*mc_json_skip_ws(p + 1)) goto fail;
         free(db_dir);
         free(text);
         return 0;
@@ -462,12 +499,15 @@ mc_load_compile_db(const char *path, struct mc_compile_db *db)
 
                 if (strcmp(key, "directory") == 0) {
                     free(entry.directory);
+                    entry.directory = NULL;
                     p = mc_json_parse_string(p, &entry.directory);
                 } else if (strcmp(key, "file") == 0) {
                     free(entry.file);
+                    entry.file = NULL;
                     p = mc_json_parse_string(p, &entry.file);
                 } else if (strcmp(key, "command") == 0) {
                     free(entry.command);
+                    entry.command = NULL;
                     p = mc_json_parse_string(p, &entry.command);
                 } else if (strcmp(key, "arguments") == 0) {
                     if (entry.arguments) {
@@ -534,6 +574,7 @@ mc_load_compile_db(const char *path, struct mc_compile_db *db)
             continue;
         }
         if (*p == ']') {
+            if (*mc_json_skip_ws(p + 1)) goto fail;
             free(db_dir);
             free(text);
             return 0;

@@ -1,0 +1,1 @@
+tests/test19_socket_checked.c:20:18: resource acquired by accept() can reach a function exit without release or ownership transfer

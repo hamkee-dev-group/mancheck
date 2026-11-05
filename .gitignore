@@ -1,5 +1,8 @@
 # Build artifacts
+analyzer/build/
+specdb/build/
 *.o
+*.d
 *.a
 analyzer/analyzer
 specdb/specdb-build

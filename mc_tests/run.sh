@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# The legacy suite includes the optional environment audit category.
+export MANCHECK_AUDIT_ENV=1
+
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 ANALYZER_BIN="${ROOT_DIR}/analyzer/analyzer"
@@ -217,7 +220,7 @@ test_golden_outputs() {
 
         (
             cd "$ROOT_DIR"
-            "$ANALYZER_BIN" --db "$GOLDEN_DB" "$rel" >"$out" 2>&1 || true
+            "$ANALYZER_BIN" --db "$GOLDEN_DB" "$rel" >"$out" 2>&1 || { printf "analyzer failed\n" >>"$out"; }
         )
 
         # Normalize path prefix so old expectations 'tests/...' still match
@@ -394,7 +397,7 @@ test_db_multi_file() {
 
     expect_eq "$err1" "2" "test01 has 2 errors"
     expect_eq "$err2" "0" "test30 has 0 errors"
-    expect_eq "$err3" "1" "test05 has 1 error"
+    expect_eq "$err3" "2" "test05 has 2 errors (discarded result and missing cleanup)"
 }
 
 # ----------------------------------------------------------------------
@@ -457,7 +460,7 @@ test_specdb_integration() {
     out_no_specdb="$("$ANALYZER_BIN" --no-db "$src" 2>&1 || true)"
     local count_no_specdb
     count_no_specdb="$(echo "$out_no_specdb" | grep -c 'ignored return' || true)"
-    expect_eq "$count_no_specdb" "2" "without specdb: 2 issues (ftruncate + lseek)"
+    expect_eq "$count_no_specdb" "4" "reviewed mmap/munmap contracts work without specdb"
 
     # With specdb: mmap + munmap should also be flagged (4 total)
     local out_with_specdb
@@ -528,7 +531,7 @@ test_gcc_format_double_close() {
     local out
     out="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --gcc --no-db "$src" 2>&1)" || true
 
-    if echo "$out" | grep -q 'warning: double_close: second call to close(fd); first at line 9'; then
+    if echo "$out" | grep -q 'warning: double_close: second call to close(fd); resource was already released'; then
         log_pass "gcc: double_close diagnostic in GCC-style format"
         passed=$((passed+1))
     else
@@ -615,10 +618,10 @@ test_gcc_stream_split() {
     dc_count="$(grep -c 'double_close:' "$tmperr" || true)"
     expect_eq "$dc_count" "2" "gcc-split double_close: 2 double_close diagnostics"
 
-    grep -q 'second call to close(fd); first at line 9'  "$tmperr" \
+    grep -q 'second call to close(fd); resource was already released'  "$tmperr" \
         && { log_pass "gcc-split double_close: close(fd) detail"; passed=$((passed+1)); } \
         || { log_fail "gcc-split double_close: close(fd) detail"; failed=$((failed+1)); }
-    grep -q 'second call to free(p); first at line 12'   "$tmperr" \
+    grep -q 'second call to free(p); resource was already released'   "$tmperr" \
         && { log_pass "gcc-split double_close: free(p) detail";  passed=$((passed+1)); } \
         || { log_fail "gcc-split double_close: free(p) detail";  failed=$((failed+1)); }
 
@@ -730,7 +733,7 @@ test_suppressions() {
     expect_eq "$json_read_count" "0" "JSON mode: suppressed diagnostic absent"
 
     local json_gets_count
-    json_gets_count="$(echo "$out_json" | grep -c '"gets"' || true)"
+    json_gets_count="$(echo "$out_json" | grep -c '"function":"gets"' || true)"
     expect_eq "$json_gets_count" "1" "JSON mode: unsuppressed diagnostic present"
 
     # JSON mode: checked calls in suppressed category still appear
@@ -993,7 +996,7 @@ test_inline_suppress() {
     out_json="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --json --no-db "$src" 2>/dev/null)" || true
 
     local json_gets_count
-    json_gets_count="$(echo "$out_json" | grep -c '"gets"' || true)"
+    json_gets_count="$(echo "$out_json" | grep -c '"function":"gets"' || true)"
     expect_eq "$json_gets_count" "1" "inline suppress JSON: gets() still present"
 }
 
@@ -1257,9 +1260,9 @@ test_sarif_output() {
     fail_result_count="$(echo "$fail_out" | grep -c '"ruleId"' || true)"
     expect_eq "$fail_result_count" "0" "SARIF collector failure emits no partial results"
 
-    local fail_db_count
-    fail_db_count="$(sqlite3 "$fail_db" "SELECT error_count FROM runs ORDER BY rowid DESC LIMIT 1;" 2>/dev/null || echo "")"
-    expect_eq "$fail_db_count" "1" "SARIF collector failure marks DB run as non-success"
+    local fail_db_status
+    fail_db_status="$(sqlite3 "$fail_db" "SELECT status FROM runs ORDER BY rowid DESC LIMIT 1;" 2>/dev/null || echo "")"
+    expect_eq "$fail_db_status" "failed" "SARIF collector failure marks DB run as non-success"
 }
 
 # ----------------------------------------------------------------------
@@ -1442,7 +1445,7 @@ test_json_issue_count() {
     json_mb="$(cd "$ROOT_DIR" && "$ANALYZER_BIN" --json --no-db mc_tests/tests/malloc_bad.c 2>/dev/null)" || true
     local ic_mb
     ic_mb="$(echo "$json_mb" | grep -o '"issue_count":[0-9]*' | head -1 | grep -o '[0-9]*$')"
-    expect_eq "$ic_mb" "6" "JSON issue_count for malloc_bad.c matches text-mode total"
+    expect_eq "$ic_mb" "10" "JSON issue_count for malloc_bad.c matches text-mode total"
 }
 
 # Test 18b: JSON diagnostics array includes extra-check findings
@@ -1529,7 +1532,7 @@ test_db_extra_check_facts() {
 
     local ec_mb
     ec_mb="$(sqlite3 "$db" "SELECT error_count FROM runs WHERE id=$run_id_mb;")"
-    expect_eq "$ec_mb" "6" "malloc_bad.c: error_count=6"
+    expect_eq "$ec_mb" "10" "malloc_bad.c: error_count=10 (including four missing cleanups)"
 
     local mb_facts
     mb_facts="$(sqlite3 "$db" "SELECT COUNT(*) FROM facts WHERE run_id=$run_id_mb AND kind='malloc_size_mismatch';")"
@@ -1582,7 +1585,7 @@ test_db_extra_check_facts() {
 
     local sec_mb
     sec_mb="$(sqlite3 "$sdb" "SELECT error_count FROM runs WHERE id=$sid_mb;")"
-    expect_eq "$sec_mb" "4" "suppressed malloc_bad.c: error_count=4 (only retval)"
+    expect_eq "$sec_mb" "8" "suppressed malloc_bad.c: error_count=8 (retval and cleanup)"
 
     local smb_facts
     smb_facts="$(sqlite3 "$sdb" "SELECT COUNT(*) FROM facts WHERE run_id=$sid_mb AND kind='malloc_size_mismatch';")"
@@ -1885,12 +1888,13 @@ test_analyzer_compile_commands_command_dump_views() {
     fi
 
     pp_off="$(grep -F 'preproc_cli_compdb_macro.c' "$views_off" | sed -n 's/.*"pp_user":"\(.*\)"}/\1/p')"
-    if echo "$pp_off" | grep -Fq 'compile-cmd-macro-missing' &&
-       ! echo "$pp_off" | grep -Fq 'compile-cmd-include'; then
-        log_pass "command-form compile_commands control run stays distinguishable"
+    # A missing header makes preprocessing fail. The raw view remains useful,
+    # but partial compiler output must not be presented as successful pp_user.
+    if grep -Fq '"pp_user":null' "$views_off"; then
+        log_pass "command-form control records failed preprocessing without partial output"
         passed=$((passed+1))
     else
-        log_fail "command-form compile_commands control run unexpectedly matched compdb expansion (got: $pp_off)"
+        log_fail "command-form control retained partial preprocessor output"
         failed=$((failed+1))
     fi
 }

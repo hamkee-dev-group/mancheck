@@ -1,0 +1,3 @@
+tests/test26_alloc_checked.c:6:15: resource acquired by malloc() can reach a function exit without release or ownership transfer
+tests/test26_alloc_checked.c:9:15: resource acquired by calloc() can reach a function exit without release or ownership transfer
+tests/test26_alloc_checked.c:12:15: resource acquired by realloc() can reach a function exit without release or ownership transfer

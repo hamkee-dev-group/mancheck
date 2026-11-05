@@ -5,6 +5,7 @@
 
 #include "mc_ts.h"
 #include "mc_rules.h"
+#include "mc_flow.h"
 #include "report.h"
 #include "mc_suppress.h"
 
@@ -75,6 +76,21 @@ static char *read_file(const char *path, size_t *out_len) {
 
 /* --- file lifecycle ------------------------------------------------- */
 
+static const char *const *g_line_files;
+static size_t g_line_files_count;
+void mc_ts_set_line_files(const char *const *files, size_t count)
+{
+    g_line_files = files;
+    g_line_files_count = files ? count : 0;
+}
+
+const char *mc_ts_row_file(const mc_ts_file *f, uint32_t row)
+{
+    if (f->line_files && row < f->line_map_count && f->line_files[row])
+        return f->line_files[row];
+    return f->path;
+}
+
 static bool mc_ts_file_init_source(mc_ts_file *f, const char *path,
                                    char *source, size_t source_len,
                                    const unsigned *line_map,
@@ -85,6 +101,8 @@ static bool mc_ts_file_init_source(mc_ts_file *f, const char *path,
     f->source_len = source_len;
     f->line_map = line_map;
     f->line_map_count = line_map_count;
+    if (line_map && g_line_files && g_line_files_count == line_map_count)
+        f->line_files = g_line_files;
 
     f->parser = ts_parser_new();
     if (!f->parser) {
@@ -118,6 +136,9 @@ static bool mc_ts_file_init_source(mc_ts_file *f, const char *path,
     }
 
     f->root = ts_tree_root_node(f->tree);
+    if (ts_node_has_error(f->root))
+        fprintf(stderr, "analyzer: C parse errors in %s; analysis is incomplete\n", path);
+    f->flow = mc_flow_analyze(f);
     return true;
 }
 
@@ -165,6 +186,9 @@ bool mc_ts_file_init(mc_ts_file *f, const char *path) {
     }
 
     f->root = ts_tree_root_node(f->tree);
+    if (ts_node_has_error(f->root))
+        fprintf(stderr, "analyzer: C parse errors in %s; analysis is incomplete\n", path);
+    f->flow = mc_flow_analyze(f);
     if (ts_node_is_null(f->root)) {
         fprintf(stderr, "mc_ts: null root node for %s\n", path);
         ts_tree_delete(f->tree);
@@ -180,6 +204,8 @@ bool mc_ts_file_init(mc_ts_file *f, const char *path) {
 }
 
 void mc_ts_file_destroy(mc_ts_file *f) {
+    mc_flow_destroy(f->flow);
+    f->flow = NULL;
     if (f->tree) {
         ts_tree_delete(f->tree);
         f->tree = NULL;
@@ -194,6 +220,9 @@ void mc_ts_file_destroy(mc_ts_file *f) {
     }
     f->source_len = 0;
 }
+
+static bool g_input_complete = true;
+void mc_ts_set_input_complete(bool complete) { g_input_complete = complete; }
 
 /* --- status helpers ------------------------------------------------- */
 
@@ -349,6 +378,7 @@ static mc_call_status classify_call_usage(TSNode call_node,
 typedef struct {
     const char *func_name;
     mc_call_status status;
+    const char *file;
     unsigned line;
     unsigned col;
     unsigned flags; /* mc_func_rule_flags */
@@ -358,20 +388,6 @@ typedef struct {
 typedef void (*mc_call_sink)(const mc_ts_file *file,
                              const mc_call_info *info,
                              void *userdata);
-
-/* Unified finding from any analysis pass. */
-typedef struct {
-    const char *file;
-    unsigned line;
-    unsigned col;
-    char symbol[64];
-    const char *category;   /* suppression / JSON category */
-    const char *db_kind;    /* DB facts.kind */
-    char message[256];
-    int use_issue_format;   /* 1 → mc_report_issue output; 0 → mc_report_fact_kind */
-} mc_finding;
-
-typedef void (*mc_finding_sink)(const mc_finding *f, void *userdata);
 
 /* --- format-string helper ------------------------------------------- */
 
@@ -395,59 +411,9 @@ static bool is_nonliteral_format_call(const mc_ts_file *file,
     if (named_count == 0)
         return false;
 
-    uint32_t fmt_index = 0;
-
-    if (strcmp(info->func_name, "printf") == 0 ||
-        strcmp(info->func_name, "vprintf") == 0 ||
-        strcmp(info->func_name, "scanf") == 0) {
-        fmt_index = 0;
-    } else if (strcmp(info->func_name, "fprintf") == 0 ||
-               strcmp(info->func_name, "vfprintf") == 0 ||
-               strcmp(info->func_name, "fscanf") == 0) {
-        if (named_count < 2)
-            return false;
-        fmt_index = 1;
-    } else if (strcmp(info->func_name, "dprintf") == 0) {
-        if (named_count < 2)
-            return false;
-        fmt_index = 1;
-    } else if (strcmp(info->func_name, "snprintf") == 0 ||
-               strcmp(info->func_name, "vsnprintf") == 0) {
-        if (named_count < 3)
-            return false;
-        fmt_index = 2;
-    } else if (strcmp(info->func_name, "sprintf") == 0 ||
-               strcmp(info->func_name, "vsprintf") == 0 ||
-               strcmp(info->func_name, "sscanf") == 0 ||
-               strcmp(info->func_name, "asprintf") == 0 ||
-               strcmp(info->func_name, "vasprintf") == 0) {
-        if (named_count < 2)
-            return false;
-        fmt_index = 1;
-    } else {
-        /*
-         * Unknown format-string function (discovered via specdb).
-         * Heuristic: the format parameter is typically the last named
-         * parameter before the variadic args.  For functions with 1 arg
-         * it's index 0, for 2 args it's index 1, etc.  But we can't
-         * easily distinguish the variadic args in the tree-sitter AST.
-         * Fall back: scan all string-literal arguments; if none of them
-         * are string literals, the format is likely non-literal.
-         * Simpler: check each argument from 0..n-1 and report if any
-         * const char* position is non-literal.
-         *
-         * Simplest practical heuristic: for a function with N args where
-         * N >= 2, the format is likely at index N-2 (penultimate arg
-         * before the variadic expansion). For N == 1, it's index 0.
-         * For N == 0, bail.
-         */
-        if (named_count == 0)
-            return false;
-        if (named_count == 1)
-            fmt_index = 0;
-        else
-            fmt_index = 1;  /* most format-string functions: fmt is 2nd arg */
-    }
+    const struct specdb_contract *contract = mc_rules_contract(info->func_name);
+    if (!contract || contract->format_index < 0) return false;
+    uint32_t fmt_index = (uint32_t)contract->format_index;
 
     if (fmt_index >= named_count)
         return false;
@@ -456,8 +422,10 @@ static bool is_nonliteral_format_call(const mc_ts_file *file,
     if (ts_node_is_null(fmt_node))
         return false;
 
+    while (strcmp(ts_node_type(fmt_node), "parenthesized_expression") == 0)
+        fmt_node = ts_node_named_child(fmt_node, 0);
     const char *t = ts_node_type(fmt_node);
-    if (strcmp(t, "string_literal") == 0) {
+    if (strcmp(t, "string_literal") == 0 || strcmp(t, "concatenated_string") == 0) {
         return false;
     }
 
@@ -470,197 +438,6 @@ static void mc_ts_node_text_copy(const mc_ts_file *f,
                                  char *buf,
                                  size_t bufsize);
 
-/* --- stored-but-not-checked analysis -------------------------------- */
-
-/* Check if text [text, text+text_len) contains `name` as a whole-word identifier. */
-static bool
-text_contains_ident(const char *text, size_t text_len,
-                    const char *name, size_t name_len)
-{
-    if (name_len == 0 || name_len > text_len)
-        return false;
-
-    for (size_t i = 0; i + name_len <= text_len; i++) {
-        if (memcmp(text + i, name, name_len) != 0)
-            continue;
-        /* word-boundary check */
-        bool left_ok  = (i == 0) ||
-                        !(isalnum((unsigned char)text[i - 1]) || text[i - 1] == '_');
-        bool right_ok = (i + name_len >= text_len) ||
-                        !(isalnum((unsigned char)text[i + name_len]) ||
-                          text[i + name_len] == '_');
-        if (left_ok && right_ok)
-            return true;
-    }
-    return false;
-}
-
-/* Walk up from `node` until we find a direct child of a compound_statement. */
-static TSNode
-find_enclosing_block_stmt(TSNode node)
-{
-    TSNode child  = node;
-    TSNode parent = ts_node_parent(node);
-    while (!ts_node_is_null(parent)) {
-        if (strcmp(ts_node_type(parent), "compound_statement") == 0)
-            return child;
-        child  = parent;
-        parent = ts_node_parent(parent);
-    }
-    return mc_ts_null_node();
-}
-
-/* Extract the variable name when a call's return value is stored via
- * init_declarator (int fd = open(..)) or assignment_expression (fd = open(..)). */
-static bool
-extract_store_varname(const mc_ts_file *f, TSNode call_node,
-                      char *buf, size_t bufsize)
-{
-    TSNode expr   = ascend_expression(call_node);
-    TSNode parent = ts_node_parent(expr);
-    if (ts_node_is_null(parent))
-        return false;
-
-    const char *etype = ts_node_type(expr);
-    const char *ptype = ts_node_type(parent);
-
-    TSNode var_node = mc_ts_null_node();
-
-    /* Case 1: init_declarator  →  int fd = open(...) */
-    if (strcmp(etype, "init_declarator") == 0 ||
-        strcmp(ptype, "init_declarator") == 0) {
-        TSNode init = (strcmp(etype, "init_declarator") == 0) ? expr : parent;
-        var_node = ts_node_child_by_field_name(
-            init, "declarator", (uint32_t)strlen("declarator"));
-        /* Drill through pointer_declarator: int *p = malloc(...) */
-        while (!ts_node_is_null(var_node) &&
-               strcmp(ts_node_type(var_node), "pointer_declarator") == 0) {
-            TSNode inner = mc_ts_null_node();
-            uint32_t nc = ts_node_named_child_count(var_node);
-            for (uint32_t i = 0; i < nc; i++) {
-                TSNode ch = ts_node_named_child(var_node, i);
-                if (strcmp(ts_node_type(ch), "identifier") == 0) {
-                    inner = ch;
-                    break;
-                }
-            }
-            var_node = inner;
-        }
-    }
-    /* Case 2: assignment_expression  →  fd = open(...) */
-    else if (strcmp(etype, "assignment_expression") == 0 ||
-             strcmp(ptype, "assignment_expression") == 0) {
-        TSNode assign = (strcmp(etype, "assignment_expression") == 0) ? expr : parent;
-        var_node = ts_node_child_by_field_name(
-            assign, "left", (uint32_t)strlen("left"));
-    }
-
-    if (ts_node_is_null(var_node))
-        return false;
-    if (strcmp(ts_node_type(var_node), "identifier") != 0)
-        return false;
-
-    mc_ts_node_text_copy(f, var_node, buf, bufsize);
-    return buf[0] != '\0';
-}
-
-/* Check if a subtree's source text contains the given identifier. */
-static bool
-subtree_has_ident(const mc_ts_file *f, TSNode node,
-                  const char *name, size_t name_len)
-{
-    uint32_t sb = ts_node_start_byte(node);
-    uint32_t eb = ts_node_end_byte(node);
-    if (eb > f->source_len) eb = (uint32_t)f->source_len;
-    if (sb >= eb) return false;
-    return text_contains_ident(f->source + sb, eb - sb, name, name_len);
-}
-
-/* Scan siblings after `store_stmt` in the enclosing compound_statement.
- * Return true if `varname` is used in a condition, return, or (void) cast. */
-static bool
-is_var_checked_in_block(const mc_ts_file *f, TSNode store_stmt,
-                        const char *varname)
-{
-    size_t vlen = strlen(varname);
-    TSNode parent = ts_node_parent(store_stmt);
-    if (ts_node_is_null(parent))
-        return false;
-
-    uint32_t n = ts_node_named_child_count(parent);
-    bool found_self = false;
-
-    for (uint32_t i = 0; i < n; i++) {
-        TSNode child = ts_node_named_child(parent, i);
-
-        if (!found_self) {
-            if (ts_node_start_byte(child) == ts_node_start_byte(store_stmt) &&
-                ts_node_end_byte(child) == ts_node_end_byte(store_stmt))
-                found_self = true;
-            continue;
-        }
-
-        const char *ntype = ts_node_type(child);
-
-        /* if / while / for / do / switch: check condition subtree */
-        if (strcmp(ntype, "if_statement") == 0 ||
-            strcmp(ntype, "while_statement") == 0 ||
-            strcmp(ntype, "for_statement") == 0 ||
-            strcmp(ntype, "do_statement") == 0 ||
-            strcmp(ntype, "switch_statement") == 0) {
-            TSNode cond = ts_node_child_by_field_name(
-                child, "condition", (uint32_t)strlen("condition"));
-            if (!ts_node_is_null(cond) && subtree_has_ident(f, cond, varname, vlen))
-                return true;
-        }
-
-        /* return var; */
-        if (strcmp(ntype, "return_statement") == 0) {
-            if (subtree_has_ident(f, child, varname, vlen))
-                return true;
-        }
-
-        /* (void)var; — explicit acknowledgment */
-        if (strcmp(ntype, "expression_statement") == 0) {
-            TSNode inner = ts_node_named_child(child, 0);
-            if (!ts_node_is_null(inner) &&
-                strcmp(ts_node_type(inner), "cast_expression") == 0) {
-                if (subtree_has_ident(f, inner, varname, vlen))
-                    return true;
-            }
-            /* check_*(var); — direct call to a check_-prefixed helper */
-            if (!ts_node_is_null(inner) &&
-                strcmp(ts_node_type(inner), "call_expression") == 0) {
-                TSNode fn = ts_node_child_by_field_name(
-                    inner, "function", (uint32_t)strlen("function"));
-                if (!ts_node_is_null(fn) &&
-                    strcmp(ts_node_type(fn), "identifier") == 0) {
-                    char fname[64];
-                    mc_ts_node_text_copy(f, fn, fname, sizeof fname);
-                    if (strncmp(fname, "check_", 6) == 0) {
-                        TSNode args = ts_node_child_by_field_name(
-                            inner, "arguments", (uint32_t)strlen("arguments"));
-                        if (!ts_node_is_null(args)) {
-                            uint32_t ac = ts_node_named_child_count(args);
-                            for (uint32_t j = 0; j < ac; j++) {
-                                TSNode arg = ts_node_named_child(args, j);
-                                if (strcmp(ts_node_type(arg), "identifier") != 0)
-                                    continue;
-                                char aname[64];
-                                mc_ts_node_text_copy(f, arg, aname, sizeof aname);
-                                if (strcmp(aname, varname) == 0)
-                                    return true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    return false;
-}
-
 /* --- generic call walker -------------------------------------------- */
 
 static void analyze_calls(const mc_ts_file *f, mc_call_sink sink, void *userdata) {
@@ -668,7 +445,7 @@ static void analyze_calls(const mc_ts_file *f, mc_call_sink sink, void *userdata
 
     const char *query_src =
         "(call_expression "
-        "  function: (identifier) @func "
+        "  function: (_) @func "
         ") @call";
 
     uint32_t error_offset = 0;
@@ -708,6 +485,9 @@ static void analyze_calls(const mc_ts_file *f, mc_call_sink sink, void *userdata
                 continue;
 
             if (name_len == 4 && strncmp(cap_name, "func", 4) == 0) {
+                while (strcmp(ts_node_type(node), "parenthesized_expression") == 0)
+                    node = ts_node_named_child(node, 0);
+                if (strcmp(ts_node_type(node), "identifier") != 0) continue;
                 uint32_t sb = ts_node_start_byte(node);
                 uint32_t eb = ts_node_end_byte(node);
                 if (eb > f->source_len)
@@ -737,20 +517,7 @@ static void analyze_calls(const mc_ts_file *f, mc_call_sink sink, void *userdata
                                                 f->source,
                                                 f->source_len);
 
-        /* Stored-but-not-checked: if the return value was stored in a
-         * variable but the variable is never used in a condition, return,
-         * or acknowledged via (void)var, reclassify as STORED_UNCHECKED. */
-        if (st == MC_CALL_STATUS_STORED &&
-            (rule->flags & MC_FUNC_RULE_RETVAL_MUST_CHECK)) {
-            char varname[64];
-            if (extract_store_varname(f, call_node, varname, sizeof varname)) {
-                TSNode block_stmt = find_enclosing_block_stmt(call_node);
-                if (!ts_node_is_null(block_stmt) &&
-                    !is_var_checked_in_block(f, block_stmt, varname)) {
-                    st = MC_CALL_STATUS_STORED_UNCHECKED;
-                }
-            }
-        }
+        st = mc_flow_status(f->flow, call_node, st);
 
         TSPoint pt = ts_node_start_point(call_node);
         mc_call_info info;
@@ -758,6 +525,7 @@ static void analyze_calls(const mc_ts_file *f, mc_call_sink sink, void *userdata
         info.status = st;
 
         /* Translate line via pp line map if available. */
+        info.file = mc_ts_row_file(f, pt.row);
         if (f->line_map && pt.row < (uint32_t)f->line_map_count)
             info.line = f->line_map[pt.row];
         else
@@ -790,7 +558,7 @@ static void call_to_finding_sink(const mc_ts_file *file,
     mc_finding f;
     memset(&f, 0, sizeof f);
 
-    f.file = file->path;
+    f.file = info->file;
     f.line = info->line;
     f.col  = info->col;
     snprintf(f.symbol, sizeof f.symbol, "%s", info->func_name);
@@ -893,7 +661,7 @@ static void mc_ts_identifier_name(const mc_ts_file *f,
 {
     if (bufsize == 0)
         return;
-    if (strcmp(ts_node_type(node), "identifier") != 0) {
+    if (ts_node_is_null(node) || strcmp(ts_node_type(node), "identifier") != 0) {
         buf[0] = '\0';
         return;
     }
@@ -1010,7 +778,7 @@ static void mc_extra_check_env_call(const mc_ts_file *f,
 
     mc_finding finding;
     memset(&finding, 0, sizeof finding);
-    finding.file     = f->path;
+    finding.file     = mc_ts_row_file(f, ts_node_start_point(call).row);
     finding.line     = mc_ts_node_start_line(f, call);
     finding.col      = mc_ts_node_start_col(call);
     snprintf(finding.symbol, sizeof finding.symbol, "%s", symbol);
@@ -1072,405 +840,77 @@ static void mc_extra_check_declaration_malloc_mismatch(const mc_ts_file *f,
         if (var_name[0] == '\0')
             continue;
 
-        char init_text[256];
-        mc_ts_node_text_copy(f, value, init_text, sizeof init_text);
-
-        char pat1[96];
-        char pat2[96];
-        snprintf(pat1, sizeof pat1, "sizeof(%s)", var_name);
-        snprintf(pat2, sizeof pat2, "sizeof (%s)", var_name);
-
-        if (strstr(init_text, pat1) == NULL && strstr(init_text, pat2) == NULL)
-            continue;
+        bool pointer = false, mismatch = false;
+        TSTreeCursor cursor = ts_tree_cursor_new(declarator);
+        for (;;) {
+            if (!strcmp(ts_node_type(ts_tree_cursor_current_node(&cursor)), "pointer_declarator")) pointer = true;
+            if (ts_tree_cursor_goto_first_child(&cursor)) continue;
+            while (!ts_tree_cursor_goto_next_sibling(&cursor))
+                if (!ts_tree_cursor_goto_parent(&cursor)) goto declarator_done;
+        }
+declarator_done:
+        ts_tree_cursor_delete(&cursor);
+        if (!pointer) continue;
+        cursor = ts_tree_cursor_new(value);
+        for (;;) {
+            TSNode node = ts_tree_cursor_current_node(&cursor);
+            if (!strcmp(ts_node_type(node), "sizeof_expression")) {
+                TSNode arg = ts_node_child_by_field_name(node, "value", 5);
+                while (!ts_node_is_null(arg) && !strcmp(ts_node_type(arg), "parenthesized_expression"))
+                    arg = ts_node_named_child(arg, 0);
+                char name[64]; mc_ts_identifier_name(f, arg, name, sizeof name);
+                if (!strcmp(name, var_name)) mismatch = true;
+            }
+            if (ts_tree_cursor_goto_first_child(&cursor)) continue;
+            while (!ts_tree_cursor_goto_next_sibling(&cursor))
+                if (!ts_tree_cursor_goto_parent(&cursor)) goto sizeof_done;
+        }
+sizeof_done:
+        ts_tree_cursor_delete(&cursor);
+        if (!mismatch) continue;
 
         mc_finding finding;
         memset(&finding, 0, sizeof finding);
-        finding.file     = f->path;
+        finding.file     = mc_ts_row_file(f, ts_node_start_point(value).row);
         finding.line     = mc_ts_node_start_line(f, value);
         finding.col      = mc_ts_node_start_col(value);
         snprintf(finding.symbol, sizeof finding.symbol, "%s", var_name);
         finding.category = "malloc_size_mismatch";
         finding.db_kind  = "malloc_size_mismatch";
         snprintf(finding.message, sizeof finding.message,
-                 "malloc_size_mismatch: allocation for '%s' uses sizeof(%s); did you mean sizeof(*%s) or sizeof(type)?",
+                 "malloc_size_mismatch: allocation for '%.48s' uses sizeof(%.48s); did you mean sizeof(*%.48s) or sizeof(type)?",
                  var_name, var_name, var_name);
         sink(&finding, userdata);
     }
 }
 
-/* --- double_close --------------------------------------------------- */
-
-typedef struct {
-    char var[64];
-    char api[32];
-    uint32_t first_line;
-    uint32_t first_col;
-    int used;
-    int terminal;  /* 1 = close is on a path that exits (return/exit follows) */
-} mc_closed_entry;
-
-#define MC_MAX_CLOSED_VARS 128
-
-static bool mc_is_close_like_name(const char *name)
+/* Independent syntax checks use a cursor: no fixed sibling limit. */
+static void mc_extra_check_function_body(const mc_ts_file *f, TSNode func_def,
+                                         mc_finding_sink sink, void *userdata)
 {
-    return strcmp(name, "close")  == 0 ||
-           strcmp(name, "fclose") == 0 ||
-           strcmp(name, "pclose") == 0 ||
-           strcmp(name, "free")   == 0 ||
-           strcmp(name, "munmap") == 0;
-}
-
-/*
- * Check whether a close() call is "terminal" — i.e., the containing block
- * immediately returns or exits after the close.  Pattern:
- *     close(fd); return ...;     // terminal
- *     close(fd); exit(1);        // terminal
- *     close(fd); _exit(1);       // terminal
- *     close(fd); [more code]     // NOT terminal
- *
- * Walk up from the call to find the expression_statement, then check if the
- * next sibling in the parent block is return/exit.
- */
-static bool mc_is_exit_call(const mc_ts_file *f, TSNode stmt)
-{
-    /* Check if stmt is an expression_statement containing a call to exit/_exit. */
-    if (strcmp(ts_node_type(stmt), "expression_statement") != 0)
-        return false;
-
-    uint32_t nc = ts_node_named_child_count(stmt);
-    for (uint32_t j = 0; j < nc; j++) {
-        TSNode expr = ts_node_named_child(stmt, j);
-        if (strcmp(ts_node_type(expr), "call_expression") != 0)
-            continue;
-
-        TSNode fn = ts_node_child_by_field_name(
-            expr, "function", (uint32_t)strlen("function"));
-        if (ts_node_is_null(fn))
-            continue;
-        if (strcmp(ts_node_type(fn), "identifier") != 0)
-            continue;
-
-        char name[16];
-        mc_ts_node_text_copy(f, fn, name, sizeof name);
-        if (strcmp(name, "exit")  == 0 ||
-            strcmp(name, "_exit") == 0 ||
-            strcmp(name, "_Exit") == 0 ||
-            strcmp(name, "abort") == 0)
-            return true;
-    }
-    return false;
-}
-
-/* Exact text equality of two node spans, compared directly against the
- * source buffer (no truncation, no fixed-size copy). */
-static bool mc_node_text_eq(const mc_ts_file *f, TSNode a, TSNode b)
-{
-    uint32_t asb = ts_node_start_byte(a), aeb = ts_node_end_byte(a);
-    uint32_t bsb = ts_node_start_byte(b), beb = ts_node_end_byte(b);
-    if (aeb > f->source_len) aeb = (uint32_t)f->source_len;
-    if (beb > f->source_len) beb = (uint32_t)f->source_len;
-    if (asb >= aeb || bsb >= beb)
-        return false;
-    if ((aeb - asb) != (beb - bsb))
-        return false;
-    return memcmp(f->source + asb, f->source + bsb, aeb - asb) == 0;
-}
-
-/*
- * Search the subtree rooted at root for a labeled_statement whose label
- * text equals label_id's text and whose immediate body is a direct
- * return_statement or a direct exit-call expression_statement.  Used to
- * recognize cleanup labels like `out: return;` so that
- * `close(fd); goto out;` is treated as terminal.  Traversal uses a
- * tree-sitter cursor so depth is bounded by the tree itself rather
- * than a fixed-size stack.
- */
-static bool mc_labeled_target_is_terminal(const mc_ts_file *f,
-                                          TSNode root,
-                                          TSNode label_id)
-{
-    if (ts_node_is_null(root) || ts_node_is_null(label_id))
-        return false;
-
-    TSTreeCursor cursor = ts_tree_cursor_new(root);
-    bool result = false;
-    bool advanced = ts_tree_cursor_goto_first_child(&cursor);
-
-    while (advanced) {
+    TSNode body = ts_node_child_by_field_name(func_def, "body", 4);
+    TSTreeCursor cursor = ts_tree_cursor_new(body);
+    for (;;) {
         TSNode node = ts_tree_cursor_current_node(&cursor);
-        if (strcmp(ts_node_type(node), "labeled_statement") == 0) {
-            TSNode lab = ts_node_child_by_field_name(
-                node, "label", (uint32_t)strlen("label"));
-            if (!ts_node_is_null(lab) &&
-                mc_node_text_eq(f, lab, label_id)) {
-                uint32_t nc = ts_node_named_child_count(node);
-                if (nc >= 2) {
-                    TSNode body = ts_node_named_child(node, 1);
-                    const char *bt = ts_node_type(body);
-                    if (strcmp(bt, "return_statement") == 0 ||
-                        mc_is_exit_call(f, body))
-                        result = true;
-                }
-                break;
-            }
-        }
-
-        if (ts_tree_cursor_goto_first_child(&cursor))
-            continue;
-        while (!ts_tree_cursor_goto_next_sibling(&cursor)) {
-            if (!ts_tree_cursor_goto_parent(&cursor)) {
-                advanced = false;
-                break;
-            }
-        }
-    }
-
-    ts_tree_cursor_delete(&cursor);
-    return result;
-}
-
-static bool mc_is_terminal_close(const mc_ts_file *f, TSNode call)
-{
-    /* Walk up to the expression_statement containing this call. */
-    TSNode stmt = call;
-    while (!ts_node_is_null(stmt)) {
-        if (strcmp(ts_node_type(stmt), "expression_statement") == 0)
-            break;
-        stmt = ts_node_parent(stmt);
-    }
-    if (ts_node_is_null(stmt))
-        return false;
-
-    TSNode parent = ts_node_parent(stmt);
-    if (ts_node_is_null(parent))
-        return false;
-
-    /* Locate the enclosing function body so we can resolve goto labels. */
-    TSNode func_body = mc_ts_null_node();
-    {
-        TSNode w = stmt;
-        while (!ts_node_is_null(w)) {
-            if (strcmp(ts_node_type(w), "function_definition") == 0) {
-                func_body = ts_node_child_by_field_name(
-                    w, "body", (uint32_t)strlen("body"));
-                break;
-            }
-            w = ts_node_parent(w);
-        }
-    }
-
-    /*
-     * Check if any remaining sibling in this block is a return or exit.
-     * This handles patterns like:
-     *     free(buf); close(fd); return -1;
-     * where free's immediate next sibling is close(), but the block
-     * ends with return — so all statements in this block are terminal.
-     */
-    uint32_t n = ts_node_named_child_count(parent);
-    bool found_self = false;
-    for (uint32_t i = 0; i < n; i++) {
-        TSNode child = ts_node_named_child(parent, i);
-        if (!found_self) {
-            if (ts_node_start_byte(child) == ts_node_start_byte(stmt) &&
-                ts_node_end_byte(child)   == ts_node_end_byte(stmt))
-                found_self = true;
-            continue;
-        }
-        /* Check all subsequent siblings for return/exit. */
-        const char *ntype = ts_node_type(child);
-        if (strcmp(ntype, "return_statement") == 0)
-            return true;
-        if (mc_is_exit_call(f, child))
-            return true;
-        /*
-         * `goto LABEL;` where LABEL is a cleanup label whose immediate
-         * body is `return ...;` or an exit call also terminates the
-         * current path.
-         */
-        if (strcmp(ntype, "goto_statement") == 0 &&
-            !ts_node_is_null(func_body)) {
-            TSNode lab = ts_node_child_by_field_name(
-                child, "label", (uint32_t)strlen("label"));
-            if (!ts_node_is_null(lab) &&
-                mc_labeled_target_is_terminal(f, func_body, lab))
-                return true;
-        }
-    }
-    return false;
-}
-
-static void mc_extra_check_double_close_call(const mc_ts_file *f,
-                                             TSNode call,
-                                             mc_closed_entry *table,
-                                             size_t table_len,
-                                             mc_finding_sink sink,
-                                             void *userdata)
-{
-    TSNode func = ts_node_child_by_field_name(call, "function",
-                                              (uint32_t)strlen("function"));
-    if (ts_node_is_null(func))
-        return;
-
-    char name[32];
-    mc_ts_node_text_copy(f, func, name, sizeof name);
-    if (!mc_is_close_like_name(name))
-        return;
-
-    TSNode args = ts_node_child_by_field_name(call, "arguments",
-                                              (uint32_t)strlen("arguments"));
-    if (ts_node_is_null(args))
-        return;
-
-    uint32_t named_count = ts_node_named_child_count(args);
-    if (named_count == 0)
-        return;
-
-    TSNode arg0 = ts_node_named_child(args, 0);
-
-    char var[64] = {0};
-    const char *atype = ts_node_type(arg0);
-
-    if (strcmp(atype, "identifier") == 0) {
-        mc_ts_identifier_name(f, arg0, var, sizeof var);
-    } else if (strcmp(atype, "unary_expression") == 0) {
-        TSNode inner = ts_node_named_child(arg0, 0);
-        if (!ts_node_is_null(inner) &&
-            strcmp(ts_node_type(inner), "identifier") == 0) {
-            mc_ts_identifier_name(f, inner, var, sizeof var);
-        }
-    }
-
-    if (var[0] == '\0')
-        return;
-
-    /* Is this close on a terminal path (followed by return/exit)? */
-    int this_is_terminal = mc_is_terminal_close(f, call) ? 1 : 0;
-
-    for (size_t i = 0; i < table_len; i++) {
-        if (!table[i].used)
-            continue;
-        if (strcmp(table[i].var, var) == 0) {
-            /*
-             * Skip if the first close was terminal — it's on a path
-             * that exits, so a later close on a different path is fine.
-             */
-            if (table[i].terminal)
-                continue;
-
-            mc_finding finding;
-            memset(&finding, 0, sizeof finding);
-            finding.file     = f->path;
-            finding.line     = mc_ts_node_start_line(f, call);
-            finding.col      = mc_ts_node_start_col(call);
-            snprintf(finding.symbol, sizeof finding.symbol, "%s", var);
-            finding.category = "double_close";
-            finding.db_kind  = "double_close";
-            snprintf(finding.message, sizeof finding.message,
-                     "double_close: second call to %s(%s); first at line %u",
-                     name, var, table[i].first_line);
-            sink(&finding, userdata);
-            return;
-        }
-    }
-
-    for (size_t i = 0; i < table_len; i++) {
-        if (!table[i].used) {
-            table[i].used       = 1;
-            table[i].terminal   = this_is_terminal;
-            table[i].first_line = mc_ts_node_start_line(f, call);
-            table[i].first_col  = mc_ts_node_start_col(call);
-            strncpy(table[i].var, var, sizeof table[i].var - 1);
-            table[i].var[sizeof table[i].var - 1] = '\0';
-            strncpy(table[i].api, name, sizeof table[i].api - 1);
-            table[i].api[sizeof table[i].api - 1] = '\0';
-            return;
-        }
-    }
-}
-
-/* --- per-function DFS for extra checks ------------------------------ */
-
-static void mc_extra_check_function_body(const mc_ts_file *f,
-                                         TSNode func_def,
-                                         mc_finding_sink sink,
-                                         void *userdata)
-{
-    TSNode body = ts_node_child_by_field_name(func_def, "body",
-                                              (uint32_t)strlen("body"));
-    if (ts_node_is_null(body))
-        return;
-
-    mc_closed_entry closed[MC_MAX_CLOSED_VARS];
-    memset(closed, 0, sizeof closed);
-
-    TSNode stack[256];
-    unsigned sp = 0;
-    stack[sp++] = body;
-
-    /*
-     * Pending clears for assignment_expression LHS identifiers.  The
-     * clear must run AFTER the RHS subtree has been analyzed (so a
-     * `fd = close(fd)` after a prior close still reports double_close)
-     * and BEFORE any sibling of the assignment is processed.  We record
-     * the sp value at the moment the assignment is popped; once sp
-     * returns to that level all of the assignment's descendants have
-     * been processed, and we apply the clear.
-     */
-    struct { char var[64]; unsigned boundary; } pending[64];
-    unsigned pc = 0;
-
-    while (sp > 0) {
-        while (pc > 0 && pending[pc - 1].boundary >= sp) {
-            const char *vname = pending[pc - 1].var;
-            for (size_t i = 0; i < MC_MAX_CLOSED_VARS; i++) {
-                if (closed[i].used &&
-                    strcmp(closed[i].var, vname) == 0) {
-                    closed[i].used = 0;
-                }
-            }
-            pc--;
-        }
-
-        TSNode node = stack[--sp];
         const char *type = ts_node_type(node);
-
-        if (strcmp(type, "call_expression") == 0) {
-            mc_extra_check_double_close_call(f, node,
-                                             closed, MC_MAX_CLOSED_VARS,
-                                             sink, userdata);
+        if (!strcmp(type, "declaration"))
+            mc_extra_check_declaration_malloc_mismatch(f, node, sink, userdata);
+        /* Environment auditing is opt-in: the API itself is not a mistake. */
+        if (getenv("MANCHECK_AUDIT_ENV") && !strcmp(type, "call_expression"))
             mc_extra_check_env_call(f, node, sink, userdata);
-        } else if (strcmp(type, "assignment_expression") == 0) {
-            TSNode lhs = ts_node_child_by_field_name(
-                node, "left", (uint32_t)strlen("left"));
-            if (!ts_node_is_null(lhs) &&
-                strcmp(ts_node_type(lhs), "identifier") == 0 &&
-                pc < sizeof pending / sizeof pending[0]) {
-                mc_ts_identifier_name(f, lhs,
-                                      pending[pc].var,
-                                      sizeof pending[pc].var);
-                if (pending[pc].var[0] != '\0') {
-                    pending[pc].boundary = sp;
-                    pc++;
-                }
-            }
-        } else if (strcmp(type, "declaration") == 0) {
-            mc_extra_check_declaration_malloc_mismatch(f, node,
-                                                       sink, userdata);
-        }
-
-        uint32_t child_count = ts_node_named_child_count(node);
-        for (uint32_t i = 0; i < child_count; i++) {
-            if (sp >= sizeof stack / sizeof stack[0])
-                break;
-            stack[sp++] = ts_node_named_child(node, child_count - 1 - i);
-        }
+        if (ts_tree_cursor_goto_first_child(&cursor)) continue;
+        while (!ts_tree_cursor_goto_next_sibling(&cursor))
+            if (!ts_tree_cursor_goto_parent(&cursor)) goto done;
     }
+done:
+    ts_tree_cursor_delete(&cursor);
 }
 
 static void mc_run_extra_checks(const mc_ts_file *f,
                                 mc_finding_sink sink,
                                 void *userdata)
 {
+    mc_flow_findings(f->flow, sink, userdata);
     TSNode root = f->root;
     uint32_t n = ts_node_named_child_count(root);
     for (uint32_t i = 0; i < n; i++) {
@@ -1481,13 +921,47 @@ static void mc_run_extra_checks(const mc_ts_file *f,
     }
 }
 
-static void mc_collect_all_findings(const mc_ts_file *f,
-                                    mc_finding_sink sink,
-                                    void *userdata)
+typedef struct {
+    mc_finding *items;
+    size_t count, cap;
+    bool failed;
+} finding_list;
+
+static void gather_finding(const mc_finding *f, void *data)
 {
-    finding_adapter_ctx ctx = { .sink = sink, .userdata = userdata };
+    finding_list *list = data;
+    if (list->failed) return;
+    if (list->count == list->cap) {
+        size_t cap = list->cap ? list->cap * 2 : 16;
+        mc_finding *items = realloc(list->items, cap * sizeof *items);
+        if (!items) { list->failed = true; return; }
+        list->items = items; list->cap = cap;
+    }
+    list->items[list->count++] = *f;
+}
+
+static int finding_order(const void *aa, const void *bb)
+{
+    const mc_finding *a = aa, *b = bb;
+    int byfile = strcmp(a->file, b->file);
+    if (byfile) return byfile;
+    if (a->line != b->line) return a->line < b->line ? -1 : 1;
+    if (a->col != b->col) return a->col < b->col ? -1 : 1;
+    return strcmp(a->category, b->category);
+}
+
+static bool mc_collect_all_findings(const mc_ts_file *f,
+                                    mc_finding_sink sink, void *userdata)
+{
+    finding_list list = {0};
+    finding_adapter_ctx ctx = { .sink = gather_finding, .userdata = &list };
     analyze_calls(f, call_to_finding_sink, &ctx);
-    mc_run_extra_checks(f, sink, userdata);
+    mc_run_extra_checks(f, gather_finding, &list);
+    if (list.failed) { free(list.items); return false; }
+    if (list.count > 1) qsort(list.items, list.count, sizeof *list.items, finding_order);
+    for (size_t i = 0; i < list.count; i++) sink(&list.items[i], userdata);
+    free(list.items);
+    return true;
 }
 
 /* --- public entrypoints -------------------------------------------- */
@@ -1497,10 +971,11 @@ bool mc_ts_report_unchecked_calls(const char *path) {
     if (!mc_ts_file_init(&f, path))
         return false;
 
-    mc_collect_all_findings(&f, text_finding_sink, NULL);
+    bool collected = mc_collect_all_findings(&f, text_finding_sink, NULL);
 
+    bool complete = collected && g_input_complete && mc_flow_ok(f.flow) && !ts_node_has_error(f.root);
     mc_ts_file_destroy(&f);
-    return true;
+    return complete;
 }
 
 /* --- JSON report (for training / tooling) --------------------------- */
@@ -1530,100 +1005,72 @@ mc_json_escape(FILE *out, const char *s)
 
 typedef struct {
     bool first_call;
+    const finding_list *accepted;
 } json_state;
 
-typedef struct {
-    bool first;
-} json_finding_state;
+typedef finding_list sarif_state;
 
-/* JSON finding sink: applies suppression, counts, and emits JSON. */
-static void json_finding_sink(const mc_finding *f, void *userdata)
+static void record_finding(const mc_finding *f)
 {
-    json_finding_state *st = userdata;
-
-    if (f->use_issue_format) {
-        if (mc_suppress_check(f->file, "return_value_check"))
-            return;
-    } else {
-        if (f->db_kind && mc_suppress_check(f->file, f->db_kind))
-            return;
-    }
-    if (mc_inline_suppress_check(f->line))
-        return;
-    mc_report_count_issue();
-
-    if (!st->first)
-        printf(",\n");
+    if (f->use_issue_format)
+        mc_report_issue(f->file, f->line, f->col, f->symbol, f->message, 1);
     else
-        st->first = false;
-
-    printf("      {\"category\":");
-    mc_json_escape(stdout, f->category);
-    printf(",\"symbol\":");
-    mc_json_escape(stdout, f->symbol);
-    printf(",\"message\":");
-    mc_json_escape(stdout, f->message);
-    printf(",\"line\":%u,\"column\":%u}", f->line, f->col);
+        mc_report_fact_kind(f->file, f->line, f->col, f->symbol, f->db_kind, f->message, 1);
 }
 
-typedef struct {
-    mc_finding *items;
-    size_t count;
-    size_t cap;
-    bool failed;
-} sarif_state;
-
-/* Return true if this call info represents an actual diagnostic (i.e.,
- * text_warning_sink would emit a warning for it). */
-static bool is_diagnostic(const mc_ts_file *file, const mc_call_info *info)
+static void json_sink(const mc_ts_file *file, const mc_call_info *info, void *userdata)
 {
-    if (info->flags & MC_FUNC_RULE_DANGEROUS)
-        return true;
-    if ((info->flags & MC_FUNC_RULE_FORMAT_STRING) &&
-        is_nonliteral_format_call(file, info))
-        return true;
-    if (info->flags & MC_FUNC_RULE_RETVAL_MUST_CHECK) {
-        if (info->status == MC_CALL_STATUS_UNCHECKED ||
-            info->status == MC_CALL_STATUS_IGNORED_EXPLICIT ||
-            info->status == MC_CALL_STATUS_STORED_UNCHECKED)
-            return true;
+    json_state *st = userdata;
+    finding_list diagnosis = {0};
+    finding_adapter_ctx adapter = { .sink = gather_finding, .userdata = &diagnosis };
+    call_to_finding_sink(file, info, &adapter);
+    const char *category = diagnosis.count ? diagnosis.items[0].category : mc_rules_category(info->flags);
+    if (diagnosis.count) {
+        bool accepted = false;
+        for (size_t i = 0; i < st->accepted->count; i++) {
+            const mc_finding *d = &st->accepted->items[i];
+            if (d->line == info->line && d->col == info->col && !strcmp(d->category, category) &&
+                !strcmp(d->file, info->file)) accepted = true;
+        }
+        if (!accepted) { free(diagnosis.items); return; }
     }
-    return false;
+    free(diagnosis.items);
+    if (!st->first_call) printf(",\n");
+    st->first_call = false;
+    printf("      {\"function\":"); mc_json_escape(stdout, info->func_name);
+    printf(",\"path\":"); mc_json_escape(stdout, info->file);
+    printf(",\"status\":\"%s\",\"category\":\"%s\",\"line\":%u,\"column\":%u}",
+           mc_call_status_str(info->status), category, info->line, info->col);
 }
 
-static void json_sink(const mc_ts_file *file,
-                      const mc_call_info *info,
-                      void *userdata) {
-    json_state *st = (json_state *)userdata;
-
-    const char *category = mc_rules_category(info->flags);
-
-    /* Only suppress entries that are actual diagnostics, matching
-     * text_warning_sink semantics.  Checked/propagated calls pass
-     * through even if their file+category is suppressed. */
-    if (is_diagnostic(file, info)) {
-        if (mc_suppress_check(file->path, category) ||
-            mc_inline_suppress_check(info->line))
-            return;
-        mc_report_count_issue();
+static bool mc_ts_report_file_json_impl(mc_ts_file *file)
+{
+    finding_list all = {0}, accepted = {0};
+    bool collected = mc_collect_all_findings(file, gather_finding, &all);
+    if (collected && !all.failed) {
+        for (size_t i = 0; i < all.count; i++) {
+            unsigned long long before = mc_report_get_run_issue_count();
+            record_finding(&all.items[i]);
+            if (before != mc_report_get_run_issue_count()) gather_finding(&all.items[i], &accepted);
+        }
     }
-
-    if (!st->first_call) {
-        printf(",\n");
-    } else {
-        st->first_call = false;
+    bool complete = collected && !all.failed && !accepted.failed && g_input_complete && mc_flow_ok(file->flow) && !ts_node_has_error(file->root);
+    json_state state = { .first_call = true, .accepted = &accepted };
+    printf("  {\"path\":"); mc_json_escape(stdout, file->path);
+    printf(",\"calls\":[\n"); analyze_calls(file, json_sink, &state);
+    printf("\n  ],\"diagnostics\":[\n");
+    for (size_t i = 0; i < accepted.count; i++) {
+        const mc_finding *f = &accepted.items[i];
+        if (i) printf(",\n");
+        printf("      {\"category\":"); mc_json_escape(stdout, f->category);
+        printf(",\"symbol\":"); mc_json_escape(stdout, f->symbol);
+        printf(",\"message\":"); mc_json_escape(stdout, f->message);
+        printf(",\"path\":"); mc_json_escape(stdout, f->file);
+        printf(",\"line\":%u,\"column\":%u}", f->line, f->col);
     }
-
-    printf("      {\"function\":");
-    mc_json_escape(stdout, info->func_name);
-    printf(",\"status\":\"%s\","
-           "\"category\":\"%s\","
-           "\"line\":%u,"
-           "\"column\":%u}",
-           mc_call_status_str(info->status),
-           category,
-           info->line,
-           info->col);
+    printf("\n  ],\"issue_count\":%llu,\"complete\":%s}", mc_report_get_run_issue_count(), complete ? "true" : "false");
+    free(all.items); free(accepted.items);
+    return complete;
 }
 
 static bool
@@ -1695,8 +1142,8 @@ mc_ts_report_file_sarif_impl(mc_ts_file *f, int *first_result)
     sarif_state st;
     memset(&st, 0, sizeof st);
 
-    mc_collect_all_findings(f, sarif_collect_sink, &st);
-    if (st.failed) {
+    bool collected = mc_collect_all_findings(f, sarif_collect_sink, &st);
+    if (!collected || st.failed) {
         free(st.items);
         return false;
     }
@@ -1729,20 +1176,9 @@ bool mc_ts_report_file_json(const char *path) {
     if (!mc_ts_file_init(&f, path))
         return false;
 
-    json_state st = { .first_call = true };
-
-    printf("  {\"path\":");
-    mc_json_escape(stdout, path);
-    printf(",\"calls\":[\n");
-    analyze_calls(&f, json_sink, &st);
-    printf("\n  ],\"diagnostics\":[\n");
-    json_finding_state fst = { .first = true };
-    mc_run_extra_checks(&f, json_finding_sink, &fst);
-    printf("\n  ],\"issue_count\":");
-    printf("%llu}", mc_report_get_run_issue_count());
-
+    bool complete = mc_ts_report_file_json_impl(&f);
     mc_ts_file_destroy(&f);
-    return true;
+    return complete;
 }
 
 static bool
@@ -1753,6 +1189,7 @@ mc_ts_report_file_sarif(const char *path, int *first_result)
         return false;
 
     bool ok = mc_ts_report_file_sarif_impl(&f, first_result);
+    ok = ok && g_input_complete && mc_flow_ok(f.flow) && !ts_node_has_error(f.root);
     mc_ts_file_destroy(&f);
     return ok;
 }
@@ -1765,7 +1202,7 @@ bool mc_ts_report_unchecked_calls_ex(const char *path,
                                      const unsigned *line_map,
                                      size_t line_map_count)
 {
-    if (!pp_source || pp_source_len == 0)
+    if (!pp_source)
         return mc_ts_report_unchecked_calls(path);
 
     mc_ts_file f;
@@ -1781,10 +1218,11 @@ bool mc_ts_report_unchecked_calls_ex(const char *path,
         return false;
     }
 
-    mc_collect_all_findings(&f, text_finding_sink, NULL);
+    bool collected = mc_collect_all_findings(&f, text_finding_sink, NULL);
 
+    bool complete = collected && g_input_complete && mc_flow_ok(f.flow) && !ts_node_has_error(f.root);
     mc_ts_file_destroy(&f);
-    return true;
+    return complete;
 }
 
 bool mc_ts_report_file_json_ex(const char *path,
@@ -1793,7 +1231,7 @@ bool mc_ts_report_file_json_ex(const char *path,
                                const unsigned *line_map,
                                size_t line_map_count)
 {
-    if (!pp_source || pp_source_len == 0)
+    if (!pp_source)
         return mc_ts_report_file_json(path);
 
     mc_ts_file f;
@@ -1809,20 +1247,9 @@ bool mc_ts_report_file_json_ex(const char *path,
         return false;
     }
 
-    json_state st = { .first_call = true };
-
-    printf("  {\"path\":");
-    mc_json_escape(stdout, path);
-    printf(",\"calls\":[\n");
-    analyze_calls(&f, json_sink, &st);
-    printf("\n  ],\"diagnostics\":[\n");
-    json_finding_state fst = { .first = true };
-    mc_run_extra_checks(&f, json_finding_sink, &fst);
-    printf("\n  ],\"issue_count\":");
-    printf("%llu}", mc_report_get_run_issue_count());
-
+    bool complete = mc_ts_report_file_json_impl(&f);
     mc_ts_file_destroy(&f);
-    return true;
+    return complete;
 }
 
 bool mc_ts_report_file_sarif_ex(const char *path,
@@ -1832,7 +1259,7 @@ bool mc_ts_report_file_sarif_ex(const char *path,
                                 size_t line_map_count,
                                 int *first_result)
 {
-    if (!pp_source || pp_source_len == 0)
+    if (!pp_source)
         return mc_ts_report_file_sarif(path, first_result);
 
     mc_ts_file f;
@@ -1851,6 +1278,7 @@ bool mc_ts_report_file_sarif_ex(const char *path,
     }
 
     ok = mc_ts_report_file_sarif_impl(&f, first_result);
+    ok = ok && g_input_complete && mc_flow_ok(f.flow) && !ts_node_has_error(f.root);
     mc_ts_file_destroy(&f);
     return ok;
 }

@@ -1,6 +1,7 @@
 CC      ?= clang
 CFLAGS  += -std=c11 -Wall -Wextra -Wpedantic -g
 CFLAGS  += -Iinclude
+CFLAGS  += -MMD -MP
 
 CFLAGS  += -I../vendor/tree-sitter/lib/include
 CFLAGS  += -I../vendor/tree-sitter/lib/src
@@ -28,6 +29,7 @@ endif
 SRCS = \
     src/main.c \
     src/mc_ts.c \
+    src/mc_flow.c \
     src/mc_rules.c \
     src/mc_db_integration.c \
     libdb/mc_db.c \
@@ -38,12 +40,28 @@ SRCS = \
     $(TS_LIB_SRC) \
     $(TS_C_SRCS)
 
-OBJS = $(SRCS:.c=.o)
+# All objects live under build/; vendored sources stay untouched
+# (../vendor/x.c -> build/vendor/x.o, src/x.c -> build/src/x.o).
+BUILD_DIR = build
+OBJS = $(addprefix $(BUILD_DIR)/,$(patsubst ../%,%,$(SRCS:.c=.o)))
+
+.DEFAULT_GOAL := all
+-include $(OBJS:.o=.d)
 
 all: analyzer
 
+$(BUILD_DIR)/vendor/%.o: ../vendor/%.c
+	@mkdir -p $(@D)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+
+$(BUILD_DIR)/%.o: %.c
+	@mkdir -p $(@D)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+
 analyzer: $(OBJS) $(SPECDB_LIB)
-	$(CC) $(CFLAGS) -o $@ $(OBJS) $(SPECDB_LIB) $(LDLIBS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(OBJS) $(SPECDB_LIB) $(LDLIBS)
 
 clean:
-	rm -f $(OBJS) analyzer
+	rm -rf $(BUILD_DIR) analyzer
+
+.PHONY: all clean

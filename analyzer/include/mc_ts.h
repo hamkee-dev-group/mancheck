@@ -17,11 +17,16 @@ typedef struct {
     TSParser *parser;
     TSTree *tree;
     TSNode root;
+    struct mc_flow *flow;
 
     /* Optional line map (for preprocessed source).
      * If non-NULL, line_map[tree_sitter_row] = original_file_line. */
     const unsigned *line_map;
     size_t line_map_count;
+
+    /* Optional, parallel to line_map: line_files[row] = project header the
+     * row came from, or NULL for path. */
+    const char *const *line_files;
 } mc_ts_file;
 
 typedef enum {
@@ -32,6 +37,15 @@ typedef enum {
     MC_CALL_STATUS_PROPAGATED,           /* returned to caller */
     MC_CALL_STATUS_IGNORED_EXPLICIT      /* (void)call(...) style */
 } mc_call_status;
+
+void mc_ts_set_input_complete(bool complete);
+
+/* Per-row source files for the next *_ex analysis; must have line_map_count
+ * entries (see mc_ts_file.line_files). NULL clears it. */
+void mc_ts_set_line_files(const char *const *files, size_t count);
+
+/* File a tree-sitter row belongs to: a project header, or f->path. */
+const char *mc_ts_row_file(const mc_ts_file *f, uint32_t row);
 
 /* Preprocess (read + parse) one file */
 bool mc_ts_file_init(mc_ts_file *f, const char *path);

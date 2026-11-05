@@ -77,129 +77,34 @@ is_space_char(int c)
            c == '\n' || c == '\f' || c == '\v';
 }
 
-/* simple C comment stripper + whitespace normalizer */
+/* Keep line boundaries and literals intact; comments become whitespace. */
 int mc_preprocess_minimal(mc_source_views *views)
 {
-    if (!views || !views->src_raw)
-        return -1;
-
+    if (!views || !views->src_raw) return -1;
     const char *in = views->src_raw;
-    size_t len = strlen(in);
-    char *out = malloc(len + 1);
-    if (!out)
-        return -1;
-
-    enum
-    {
-        STATE_CODE,
-        STATE_SLASH,
-        STATE_LINE_COMMENT,
-        STATE_BLOCK_COMMENT,
-        STATE_BLOCK_COMMENT_STAR
-    } state = STATE_CODE;
-
-    size_t oi = 0;
-    int last_was_space = 0;
-
-    for (size_t i = 0; i < len; i++)
-    {
-        unsigned char uc = (unsigned char)in[i];
-        char c = (char)uc;
-
-        switch (state)
-        {
-        case STATE_CODE:
-            if (c == '/')
-            {
-                state = STATE_SLASH;
-            }
-            else if (is_space_char(uc))
-            {
-                if (!last_was_space)
-                {
-                    out[oi++] = ' ';
-                    last_was_space = 1;
-                }
-            }
-            else
-            {
-                out[oi++] = c;
-                last_was_space = 0;
-            }
-            break;
-
-        case STATE_SLASH:
-            if (c == '/')
-            {
-                state = STATE_LINE_COMMENT;
-            }
-            else if (c == '*')
-            {
-                state = STATE_BLOCK_COMMENT;
-            }
-            else
-            {
-                out[oi++] = '/';
-                if (is_space_char(uc))
-                {
-                    if (!last_was_space)
-                    {
-                        out[oi++] = ' ';
-                        last_was_space = 1;
-                    }
-                }
-                else
-                {
-                    out[oi++] = c;
-                    last_was_space = 0;
-                }
-                state = STATE_CODE;
-            }
-            break;
-
-        case STATE_LINE_COMMENT:
-            if (c == '\n')
-            {
-                if (!last_was_space)
-                {
-                    out[oi++] = ' ';
-                    last_was_space = 1;
-                }
-                state = STATE_CODE;
-            }
-            break;
-
-        case STATE_BLOCK_COMMENT:
-            if (c == '*')
-            {
-                state = STATE_BLOCK_COMMENT_STAR;
-            }
-            break;
-
-        case STATE_BLOCK_COMMENT_STAR:
-            if (c == '/')
-            {
-                if (!last_was_space)
-                {
-                    out[oi++] = ' ';
-                    last_was_space = 1;
-                }
-                state = STATE_CODE;
-            }
-            else if (c != '*')
-            {
-                state = STATE_BLOCK_COMMENT;
-            }
-            break;
+    char *out = strdup(in);
+    if (!out) return -1;
+    enum { CODE, STRING, CHARACTER, LINE, BLOCK } state = CODE;
+    for (size_t i = 0; in[i]; i++) {
+        if (state == STRING || state == CHARACTER) {
+            if (in[i] == '\\' && in[i + 1]) { i++; continue; }
+            if ((state == STRING && in[i] == '"') ||
+                (state == CHARACTER && in[i] == '\'')) state = CODE;
+        } else if (state == LINE) {
+            if (in[i] == '\n') {
+                if (!i || in[i - 1] != '\\') state = CODE;
+            } else out[i] = ' ';
+        } else if (state == BLOCK) {
+            if (in[i] == '*' && in[i + 1] == '/') {
+                out[i] = out[i + 1] = ' '; i++; state = CODE;
+            } else if (in[i] != '\n') out[i] = ' ';
+        } else if (in[i] == '"') state = STRING;
+        else if (in[i] == '\'') state = CHARACTER;
+        else if (in[i] == '/' && (in[i + 1] == '/' || in[i + 1] == '*')) {
+            state = in[i + 1] == '/' ? LINE : BLOCK;
+            out[i] = out[i + 1] = ' '; i++;
         }
     }
-
-    if (state == STATE_SLASH)
-    {
-        out[oi++] = '/';
-    }
-
-    out[oi] = '\0';
     views->src_min = out;
     return 0;
 }
@@ -271,21 +176,11 @@ mc_capture_argv_output(char *const argv[], const char *workdir)
 
     if (pid == 0)
     {
-        int devnull = open("/dev/null", O_WRONLY);
-
         (void)close(pipefd[0]);
 
         if (dup2(pipefd[1], STDOUT_FILENO) < 0)
             _exit(127);
         (void)close(pipefd[1]);
-
-        if (devnull >= 0)
-        {
-            if (dup2(devnull, STDERR_FILENO) < 0)
-                _exit(127);
-            if (devnull != STDERR_FILENO)
-                (void)close(devnull);
-        }
 
         if (workdir && workdir[0] != '\0' && chdir(workdir) != 0)
             _exit(127);
@@ -341,14 +236,10 @@ mc_capture_argv_output(char *const argv[], const char *workdir)
     }
 
     (void)close(pipefd[0]);
-    while (waitpid(pid, NULL, 0) < 0)
-    {
-        if (errno != EINTR)
-            break;
-    }
-
-    if (len == 0)
-    {
+    int status = 0;
+    pid_t waited;
+    do { waited = waitpid(pid, &status, 0); } while (waited < 0 && errno == EINTR);
+    if (waited < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
         free(buf);
         return NULL;
     }
@@ -408,10 +299,16 @@ mc_next_shell_token(const char *p, char *buf, size_t buf_size)
             }
         }
 
-        if (c == '\\' && p[1] != '\0')
+        if (c == '\\' && p[1] == '\0' && !quote) {
+            errno = EINVAL; return NULL;
+        }
+        if (c == '\\' && p[1] != '\0' && quote != '\'' &&
+            (quote != '"' || p[1] == '"' || p[1] == '\\' ||
+             p[1] == '$' || p[1] == '`' || p[1] == '\n'))
         {
             p++;
             c = (unsigned char)*p;
+            if (c == '\n') { p++; continue; }
         }
 
         if (len + 1 < buf_size)
@@ -419,6 +316,7 @@ mc_next_shell_token(const char *p, char *buf, size_t buf_size)
         p++;
     }
 
+    if (quote) { errno = EINVAL; return NULL; }
     buf[len] = '\0';
     return p;
 }
@@ -439,9 +337,9 @@ mc_append_tokenized_flags(mc_argv_builder *builder, const char *flags)
 
     for (;;)
     {
+        errno = 0;
         p = mc_next_shell_token(p, tok, tok_cap);
-        if (!p)
-            break;
+        if (!p) { if (errno) rc = -1; break; }
 
         if (mc_argv_builder_push(builder, tok) != 0)
         {
@@ -457,19 +355,28 @@ mc_append_tokenized_flags(mc_argv_builder *builder, const char *flags)
 static int
 mc_compile_cmd_flag_has_value(const char *tok)
 {
-    return strcmp(tok, "-std") == 0 ||
-           strcmp(tok, "-D") == 0 ||
-           strcmp(tok, "-U") == 0 ||
-           strcmp(tok, "-I") == 0;
+    const char *flags[] = {"-std", "-D", "-U", "-I", "-include", "-imacros",
+        "-isystem", "-iquote", "-idirafter", "-isysroot", "--sysroot",
+        "-target", "--target", "-x", "-resource-dir", "-iprefix",
+        "-iwithprefix", "-iwithprefixbefore", NULL};
+    for (size_t i = 0; flags[i]; i++) if (!strcmp(tok, flags[i])) return 1;
+    return 0;
 }
 
 static int
 mc_compile_cmd_flag_is_inline(const char *tok)
 {
-    return (strncmp(tok, "-std=", 5) == 0 && tok[5] != '\0') ||
-           (strncmp(tok, "-D", 2) == 0 && tok[2] != '\0') ||
-           (strncmp(tok, "-U", 2) == 0 && tok[2] != '\0') ||
-           (strncmp(tok, "-I", 2) == 0 && tok[2] != '\0');
+    const char *prefixes[] = {"-std=", "-D", "-U", "-I", "--sysroot=",
+        "--target=", "-isystem", "-iquote", "-idirafter", "-O", "-m",
+        "-fshort-", "-funsigned-char", "-fsigned-char", "-fms-", NULL};
+    for (size_t i = 0; prefixes[i]; i++) {
+        size_t n = strlen(prefixes[i]);
+        if (!strncmp(tok, prefixes[i], n) && tok[n]) return 1;
+    }
+    return !strcmp(tok, "-pthread") || !strcmp(tok, "-nostdinc") ||
+           !strcmp(tok, "-nostdinc++") || !strcmp(tok, "-undef") ||
+           !strcmp(tok, "-ffreestanding") || !strcmp(tok, "-fno-builtin") ||
+           !strcmp(tok, "-fopenmp");
 }
 
 static int
@@ -493,10 +400,14 @@ mc_append_compile_cmd_flags(mc_argv_builder *builder, const char *compile_cmd)
 
     for (;;)
     {
+        errno = 0;
         p = mc_next_shell_token(p, tok, tok_cap);
-        if (!p)
-            break;
+        if (!p) { if (errno) rc = -1; break; }
 
+        if (tok[0] == '@' || !strncmp(tok, "-Wp,", 4) || !strcmp(tok, "-Xpreprocessor")) {
+            fprintf(stderr, "error: unsupported preprocessing argument: %s\n", tok);
+            rc = -1; break;
+        }
         if (mc_compile_cmd_flag_is_inline(tok))
         {
             if (mc_argv_builder_push(builder, tok) != 0)
@@ -570,6 +481,10 @@ mc_append_compile_argv_flags(mc_argv_builder *builder,
         if (!tok)
             continue;
 
+        if (tok[0] == '@' || !strncmp(tok, "-Wp,", 4) || !strcmp(tok, "-Xpreprocessor")) {
+            fprintf(stderr, "error: unsupported preprocessing argument: %s\n", tok);
+            rc = -1; break;
+        }
         if (mc_compile_cmd_flag_is_inline(tok))
         {
             if (mc_argv_builder_push(builder, tok) != 0)
@@ -622,10 +537,7 @@ mc_append_compile_argv_flags(mc_argv_builder *builder,
     return rc;
 }
 
-/* Best-effort clang -E:
- * - on success: fills views->src_pp
- * - on failure: leaves src_pp == NULL but returns 0 so pipeline continues
- */
+/* A failed compiler must never produce a successful preprocessed view. */
 int mc_preprocess_clang(mc_source_views *views,
                         const mc_pp_config *cfg)
 {
@@ -643,7 +555,8 @@ int mc_preprocess_clang(mc_source_views *views,
         mc_append_compile_argv_flags(&argv,
                                      views->meta.compile_argv,
                                      views->meta.compile_argc) != 0 ||
-        mc_append_compile_cmd_flags(&argv, views->meta.compile_cmd) != 0 ||
+        ((!views->meta.compile_argv || !views->meta.compile_argc) &&
+         mc_append_compile_cmd_flags(&argv, views->meta.compile_cmd) != 0) ||
         mc_argv_builder_push(&argv, path) != 0)
     {
         mc_argv_builder_free(&argv);
@@ -655,16 +568,34 @@ int mc_preprocess_clang(mc_source_views *views,
 
     if (!out)
     {
-        /* clang -E failed: treat as "no preprocessed view", but not fatal */
         views->src_pp = NULL;
-        return 0;
+        return -1;
     }
 
     views->src_pp = out;
     return 0;
 }
 
-/* Build src_pp_user from src_pp using #line markers
+/* Intern a header path in views->pp_user_files; NULL on allocation failure. */
+static const char *pp_user_intern_file(mc_source_views *views, const char *path)
+{
+    for (size_t i = 0; i < views->pp_user_file_count; i++)
+        if (!strcmp(views->pp_user_files[i], path))
+            return views->pp_user_files[i];
+    char **tmp = realloc(views->pp_user_files,
+                         (views->pp_user_file_count + 1) * sizeof(*tmp));
+    if (!tmp)
+        return NULL;
+    views->pp_user_files = tmp;
+    char *copy = strdup(path);
+    if (!copy)
+        return NULL;
+    views->pp_user_files[views->pp_user_file_count++] = copy;
+    return copy;
+}
+
+/* Build src_pp_user from src_pp using #line markers: the main file plus
+ * project headers it includes. System headers (marker flag 3) are dropped.
  * Best-effort: if src_pp is NULL, leave src_pp_user NULL and succeed.
  */
 int mc_preprocess_pp_trim_user(mc_source_views *views)
@@ -674,6 +605,7 @@ int mc_preprocess_pp_trim_user(mc_source_views *views)
 
     views->pp_user_line_map = NULL;
     views->pp_user_line_count = 0;
+    views->pp_user_file_map = NULL;
 
     if (!views->src_pp || !views->meta.abs_path)
     {
@@ -696,6 +628,12 @@ int mc_preprocess_pp_trim_user(mc_source_views *views)
         free(out);
         return -1;
     }
+    const char **file_map = malloc(map_cap * sizeof(*file_map));
+    if (!file_map) {
+        free(out);
+        free(map);
+        return -1;
+    }
     size_t map_len = 0;
 
     size_t oi = 0;
@@ -703,6 +641,11 @@ int mc_preprocess_pp_trim_user(mc_source_views *views)
     const char *end = pp + len;
 
     char *current_file = NULL;
+    int include_depth = 0, main_started = 0;
+    /* Depth of the outermost system header being read; 0 = none. */
+    int system_depth = 0;
+    const char *header_file = NULL;  /* interned current header path */
+    long main_line_offset = 0;
     unsigned current_orig_line = 1;  /* original source line from # marker */
 
     while (p < end)
@@ -740,7 +683,7 @@ int mc_preprocess_pp_trim_user(mc_source_views *views)
                 while (q < line_end && *q != '"')
                     q++;
 
-                if (q <= line_end)
+                if (q < line_end)
                 {
                     size_t path_len = (size_t)(q - path_start);
                     char *path = malloc(path_len + 1);
@@ -749,11 +692,51 @@ int mc_preprocess_pp_trim_user(mc_source_views *views)
                         free(out);
                         free(current_file);
                         free(map);
+                        free(file_map);
                         return -1;
                     }
                     memcpy(path, path_start, path_len);
                     path[path_len] = '\0';
 
+                    int enter = 0, leave = 0, system = 0;
+                    const char *flags = q + 1;
+                    while (flags < line_end) {
+                        while (flags < line_end && *flags == ' ') flags++;
+                        if (flags < line_end && *flags == '1') enter = 1;
+                        if (flags < line_end && *flags == '2') leave = 1;
+                        if (flags < line_end && *flags == '3') system = 1;
+                        while (flags < line_end && *flags != ' ') flags++;
+                    }
+                    if (enter) {
+                        include_depth++;
+                        if (system && !system_depth)
+                            system_depth = include_depth;
+                    }
+                    if (leave && include_depth > 0) {
+                        include_depth--;
+                        if (include_depth < system_depth)
+                            system_depth = 0;
+                    }
+                    header_file = NULL;
+                    if (main_started && include_depth > 0 && !system_depth && path[0] != '<') {
+                        header_file = pp_user_intern_file(views, path);
+                        if (!header_file) {
+                            free(path);
+                            free(out);
+                            free(current_file);
+                            free(map);
+                            free(file_map);
+                            return -1;
+                        }
+                    }
+                    if (!strcmp(path, orig) && include_depth == 0) {
+                        main_started = 1;
+                        main_line_offset = 0;
+                    } else if (main_started && include_depth == 0 && !enter && !leave) {
+                        /* A #line directive changes the logical filename, not
+                         * membership in the main translation-unit source. */
+                        main_line_offset += (long)current_orig_line + 1 - (long)marker_line;
+                    }
                     free(current_file);
                     current_file = path;
                     current_orig_line = marker_line;
@@ -762,21 +745,32 @@ int mc_preprocess_pp_trim_user(mc_source_views *views)
         }
         else
         {
-            if (current_file && strcmp(current_file, orig) == 0)
+            if (main_started && (include_depth == 0 || header_file))
             {
                 /* Add to line map */
                 if (map_len == map_cap) {
                     map_cap *= 2;
                     unsigned *tmp = realloc(map, map_cap * sizeof(*tmp));
-                    if (!tmp) {
+                    if (tmp)
+                        map = tmp;
+                    const char **ftmp = tmp ? realloc(file_map, map_cap * sizeof(*ftmp)) : NULL;
+                    if (!ftmp) {
                         free(out);
                         free(current_file);
                         free(map);
+                        free(file_map);
                         return -1;
                     }
-                    map = tmp;
+                    file_map = ftmp;
                 }
-                map[map_len++] = current_orig_line;
+                if (include_depth == 0) {
+                    map[map_len] = (unsigned)((long)current_orig_line + main_line_offset);
+                    file_map[map_len] = NULL;
+                } else {
+                    map[map_len] = current_orig_line;
+                    file_map[map_len] = header_file;
+                }
+                map_len++;
 
                 memcpy(out + oi, line_start, line_len);
                 oi += line_len;
@@ -803,6 +797,7 @@ int mc_preprocess_pp_trim_user(mc_source_views *views)
     views->src_pp_user = out;
     views->pp_user_line_map = map;
     views->pp_user_line_count = map_len;
+    views->pp_user_file_map = file_map;
     return 0;
 }
 
@@ -816,57 +811,43 @@ void mc_free_source_views(mc_source_views *views)
     free(views->src_pp);
     free(views->src_pp_user);
     free(views->pp_user_line_map);
+    free(views->pp_user_file_map);
+    for (size_t i = 0; i < views->pp_user_file_count; i++)
+        free(views->pp_user_files[i]);
+    free(views->pp_user_files);
 
     memset(views, 0, sizeof(*views));
 }
 
-int mc_run_preproc_pipeline(const mc_file_meta *files,
-                            size_t file_count,
-                            const mc_pp_config *pp_cfg,
-                            mc_preproc_hook *hook)
+int mc_run_preproc_pipeline(const mc_file_meta *files, size_t file_count,
+                            const mc_pp_config *pp_cfg, mc_preproc_hook *hook)
 {
-    if (!files)
-        return -1;
-
-    for (size_t i = 0; i < file_count; i++)
-    {
+    if (!files) return -1;
+    int result = 0;
+    for (size_t i = 0; i < file_count; i++) {
         mc_source_views v;
-
-        if (mc_load_file(&files[i], &v) != 0)
-        {
+        if (mc_load_file(&files[i], &v) != 0) {
+            fprintf(stderr, "error: cannot read %s: %s\n", files[i].path, strerror(errno));
+            result = -1;
             continue;
         }
-
-        (void)mc_preprocess_minimal(&v);
-
-        (void)mc_preprocess_clang(&v, pp_cfg);
-
-        /* If the file had a compile-DB entry, preprocessing must succeed;
-         * a silent fallback to raw source hides compile_commands regressions. */
-        if (v.src_pp == NULL &&
-            (v.meta.compile_cmd || v.meta.compile_argc > 0))
-        {
-            fprintf(stderr,
-                    "error: preprocessing failed for %s "
-                    "(matched compilation database entry)\n",
-                    files[i].abs_path ? files[i].abs_path : files[i].path);
+        if (mc_preprocess_minimal(&v) != 0) result = -1;
+        if (mc_preprocess_clang(&v, pp_cfg) != 0) {
+            fprintf(stderr, "error: preprocessing failed for %s%s; analysis is incomplete\n",
+                    files[i].path, (v.meta.compile_cmd || v.meta.compile_argc)
+                    ? " (matched compilation database entry)" : "");
+            result = -1;
+        }
+        if (mc_preprocess_pp_trim_user(&v) != 0) {
+            fprintf(stderr, "error: source mapping failed for %s\n", files[i].path);
+            result = -1;
+        }
+        if (hook && hook->on_views && hook->on_views(hook, &v) != 0) {
             mc_free_source_views(&v);
-            return -1;
+            result = -1;
+            break;
         }
-
-        (void)mc_preprocess_pp_trim_user(&v);
-
-        if (hook && hook->on_views)
-        {
-            if (hook->on_views(hook, &v) != 0)
-            {
-                mc_free_source_views(&v);
-                break;
-            }
-        }
-
         mc_free_source_views(&v);
     }
-
-    return 0;
+    return result;
 }

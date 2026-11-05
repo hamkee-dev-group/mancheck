@@ -2,6 +2,7 @@
 #define MC_RULES_H
 
 #include <stddef.h>
+#include "specdb.h"
 
 /* Flags describing what rules apply to a function.
  *
@@ -25,10 +26,13 @@ typedef struct {
 /* Look up rules for a function name.
  * Returns NULL if the function is not interesting.
  *
- * First checks the compiled-in static table, then falls back to specdb
- * (if loaded via mc_rules_init_specdb) for RETVAL_MUST_CHECK inference.
+ * Combines the audit policy with reviewed contracts, then conservatively
+ * supplements unknown APIs from specdb signatures and attributed failure prose.
  */
 const mc_func_rule *mc_rules_lookup(const char *name);
+
+const struct specdb_contract *mc_rules_contract(const char *name);
+int mc_rules_had_error(void);
 
 /* Map flags to a JSON-friendly category string.
  * e.g. "dangerous_function", "format_string", "return_value_check", "other"

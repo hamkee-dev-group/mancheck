@@ -1,2 +1,4 @@
+tests/test32_mmap_unchecked.c:7:5: ignored return of mmap(): unchecked return value of mmap()
+tests/test32_mmap_unchecked.c:8:5: ignored return of munmap(): unchecked return value of munmap()
 tests/test32_mmap_unchecked.c:11:5: ignored return of ftruncate(): unchecked return value of ftruncate()
 tests/test32_mmap_unchecked.c:12:5: ignored return of lseek(): unchecked return value of lseek()

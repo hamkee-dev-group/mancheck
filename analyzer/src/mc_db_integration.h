@@ -6,6 +6,7 @@
 /* High-level context for one process invocation */
 typedef struct mc_db_ctx {
     mc_db db;
+    int   failed;
     int   enabled;     /* 0 = no DB, 1 = DB active */
 } mc_db_ctx;
 
@@ -28,10 +29,12 @@ int mc_db_run_begin(mc_db_ctx *ctx,
                     mc_db_run *run,
                     const char *filename);
 
-/* Finish a run and store final error_count */
+/* Finish a run: store error_count and mark it completed, or failed when
+ * analysis_failed is set or any fact for this invocation failed to persist. */
 int mc_db_run_end(mc_db_ctx *ctx,
                   mc_db_run *run,
-                  int error_count);
+                  int error_count,
+                  int analysis_failed);
 
 /*
  * Generic fact logger: inserts a row with the given kind.

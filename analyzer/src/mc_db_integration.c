@@ -64,6 +64,7 @@ int mc_db_run_begin(mc_db_ctx *ctx,
     long run_id = 0;
     int rc = mc_db_begin_run(&ctx->db, filename, &run_id);
     if (rc != 0) {
+        ctx->failed = 1;
         fprintf(stderr, "mc_db_run_begin: mc_db_begin_run failed (rc=%d)\n", rc);
         return rc;
     }
@@ -74,7 +75,8 @@ int mc_db_run_begin(mc_db_ctx *ctx,
 
 int mc_db_run_end(mc_db_ctx *ctx,
                   mc_db_run *run,
-                  int error_count)
+                  int error_count,
+                  int analysis_failed)
 {
     if (!ctx || !run) {
         return 0;
@@ -84,8 +86,11 @@ int mc_db_run_end(mc_db_ctx *ctx,
         return 0;
     }
 
-    int rc = mc_db_end_run(&ctx->db, run->run_id, error_count);
+    /* A run whose facts could not all be stored is not a complete record. */
+    int completed = !analysis_failed && !ctx->failed;
+    int rc = mc_db_end_run(&ctx->db, run->run_id, error_count, completed);
     if (rc != 0) {
+        ctx->failed = 1;
         fprintf(stderr, "mc_db_run_end: mc_db_end_run failed (rc=%d)\n", rc);
     }
 
@@ -107,12 +112,16 @@ void mc_db_log_fact(mc_db_ctx *ctx,
         return;
     }
 
-    mc_db_insert_fact(&ctx->db,
+    int rc = mc_db_insert_fact(&ctx->db,
                       run->run_id,
                       kind,
                       symbol,
                       line,
                       details);
+    if (rc != 0) {
+        ctx->failed = 1;
+        fprintf(stderr, "mc_db_log_fact: failed to persist diagnostic (rc=%d)\n", rc);
+    }
 }
 
 void mc_db_log_warning(mc_db_ctx *ctx,

@@ -178,14 +178,22 @@ main_on_views(struct mc_preproc_hook *hook,
     mc_db_run dbrun;
     memset(&dbrun, 0, sizeof(dbrun));
 
-    mc_db_run_begin(ctx->dbctx, &dbrun, path);
+    if (mc_db_run_begin(ctx->dbctx, &dbrun, path) != 0) {
+        ctx->exit_status = 1;
+        mc_inline_suppress_clear();
+        return 1;
+    }
     mc_report_set_db(ctx->dbctx, &dbrun);
+    mc_report_set_main_file(path);
 
     /* Use preprocessed source (_ex variants) when available */
     const char *pp_src = views->src_pp_user;
     size_t pp_len = pp_src ? strlen(pp_src) : 0;
     const unsigned *lmap = views->pp_user_line_map;
     size_t lmap_count = views->pp_user_line_count;
+    mc_ts_set_line_files(views->pp_user_file_map, lmap_count);
+    int analysis_failed = pp_src == NULL;
+    mc_ts_set_input_complete(!analysis_failed);
 
     if (!ctx->json_mode && !ctx->sarif_mode) {
         /* Text mode: warnings only, track issue count in DB run */
@@ -195,12 +203,13 @@ main_on_views(struct mc_preproc_hook *hook,
                                              lmap, lmap_count)) {
             fprintf(stderr, "analyzer: failed on %s\n", path);
             ctx->exit_status = 1;
+            analysis_failed = 1;
         }
 
         int error_count = (int)mc_report_get_run_issue_count();
         if (error_count > 0 && (ctx->warn_exit || ctx->gcc_mode))
             ctx->exit_status = 1;
-        mc_db_run_end(ctx->dbctx, &dbrun, error_count);
+        mc_db_run_end(ctx->dbctx, &dbrun, error_count, analysis_failed);
     } else if (ctx->json_mode) {
         /* JSON mode: aggregate per-file JSON objects into a files[] array */
         if (!ctx->first_json)
@@ -213,12 +222,13 @@ main_on_views(struct mc_preproc_hook *hook,
                                        lmap, lmap_count)) {
             fprintf(stderr, "\n/* analyzer: failed on %s */\n", path);
             ctx->exit_status = 1;
+            analysis_failed = 1;
         }
 
         int error_count = (int)mc_report_get_run_issue_count();
         if (error_count > 0 && ctx->warn_exit)
             ctx->exit_status = 1;
-        mc_db_run_end(ctx->dbctx, &dbrun, error_count);
+        mc_db_run_end(ctx->dbctx, &dbrun, error_count, analysis_failed);
     } else {
         mc_report_reset_run_counters();
 
@@ -227,7 +237,7 @@ main_on_views(struct mc_preproc_hook *hook,
                                         &ctx->first_sarif)) {
             fprintf(stderr, "analyzer: failed on %s\n", path);
             ctx->exit_status = 1;
-            mc_db_run_end(ctx->dbctx, &dbrun, 1);
+            mc_db_run_end(ctx->dbctx, &dbrun, (int)mc_report_get_run_issue_count(), 1);
             mc_inline_suppress_clear();
             return 1;
         }
@@ -235,11 +245,11 @@ main_on_views(struct mc_preproc_hook *hook,
         int error_count = (int)mc_report_get_run_issue_count();
         if (error_count > 0)
             ctx->exit_status = 1;
-        mc_db_run_end(ctx->dbctx, &dbrun, error_count);
+        mc_db_run_end(ctx->dbctx, &dbrun, error_count, analysis_failed);
     }
 
     mc_inline_suppress_clear();
-    return 0; /* continue pipeline */
+    return analysis_failed || ctx->dbctx->failed; /* continue pipeline, retain failure */
 }
 
 int
@@ -360,12 +370,8 @@ main(int argc, char **argv)
     if (db_path != NULL) {
         rc_db = mc_db_ctx_init(&dbctx, db_path);
         if (rc_db != 0) {
-            fprintf(stderr,
-                    "warning: failed to initialize DB '%s' (rc=%d); "
-                    "DB integration disabled for this run\n",
-                    db_path, rc_db);
-            /* Re-init as disabled context so helpers are safe no-ops */
-            mc_db_ctx_init(&dbctx, NULL);
+            free(files);
+            return 1;
         }
     } else {
         mc_db_ctx_init(&dbctx, NULL);
@@ -374,10 +380,9 @@ main(int argc, char **argv)
     /* Optional: load specdb for rule augmentation */
     if (specdb_path) {
         if (mc_rules_init_specdb(specdb_path) != 0) {
-            fprintf(stderr,
-                    "warning: failed to load specdb '%s'; "
-                    "specdb-based rules disabled\n",
-                    specdb_path);
+            mc_db_ctx_close(&dbctx);
+            free(files);
+            return 1;
         }
     }
 
@@ -544,7 +549,7 @@ main(int argc, char **argv)
             exit_status = ctx.exit_status;
         }
 
-        printf("\n]}\n");
+        printf("\n],\"complete\":%s}\n", rc == 0 && !mc_rules_had_error() && !dbctx.failed ? "true" : "false");
     } else {
         printf("{\"version\":\"2.1.0\",\"runs\":[{\"tool\":{\"driver\":{\"name\":\"mancheck\"}},\"results\":[\n");
 
@@ -563,9 +568,16 @@ main(int argc, char **argv)
         free((char *)metas[i].abs_path);
     free(metas);
     mc_compile_db_free(&compile_db);
-    if (dump_views)
-        (void)fclose(dump_views);
+    if (dump_views && fclose(dump_views) != 0) {
+        fprintf(stderr, "analyzer: failed to finish writing source views\n");
+        exit_status = 1;
+    }
+    if (fflush(stdout) != 0) exit_status = 1;
     mc_suppress_free();
+    if (mc_rules_had_error() || dbctx.failed) {
+        fprintf(stderr, "analyzer: contract lookup or diagnostic persistence failed\n");
+        exit_status = 1;
+    }
     mc_rules_close_specdb();
     mc_db_ctx_close(&dbctx);
     return exit_status;

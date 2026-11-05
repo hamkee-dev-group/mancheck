@@ -28,6 +28,12 @@ typedef struct {
      * Built by mc_preprocess_pp_trim_user().  NULL if pp_user is unavailable. */
     unsigned *pp_user_line_map;
     size_t    pp_user_line_count;
+
+    /* pp_user_file_map[i] = project header that pp_user line i came from, or
+     * NULL for the main file. Entries point into pp_user_files. */
+    const char **pp_user_file_map;
+    char       **pp_user_files;
+    size_t       pp_user_file_count;
 } mc_source_views;
 
 typedef struct {

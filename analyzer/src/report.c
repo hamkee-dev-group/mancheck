@@ -14,6 +14,30 @@ static unsigned long long g_run_issues = 0;
 /* GCC-compatible output mode. */
 static int g_gcc_mode = 0;
 
+static const char *g_main_file = NULL;
+
+void mc_report_set_main_file(const char *path)
+{
+    g_main_file = path;
+}
+
+static int in_main_file(const char *file)
+{
+    return !g_main_file || !file || !strcmp(file, g_main_file);
+}
+
+/* DB details: findings in project headers name the header, since the run
+ * row records only the main file. */
+static void fact_details(char *buf, size_t size, const char *file,
+                         unsigned column, const char *msg)
+{
+    const char *m = msg && msg[0] ? msg : NULL;
+    if (in_main_file(file))
+        snprintf(buf, size, m ? "col %u: %s" : "col %u", column, m);
+    else
+        snprintf(buf, size, m ? "%s col %u: %s" : "%s col %u", file, column, m);
+}
+
 void mc_report_set_gcc_mode(int enabled)
 {
     g_gcc_mode = enabled;
@@ -58,7 +82,7 @@ void mc_report_fact_kind(const char *file,
 {
     if (kind && mc_suppress_check(file, kind))
         return;
-    if (mc_inline_suppress_check(line))
+    if (in_main_file(file) && mc_inline_suppress_check(line))
         return;
 
     if (!quiet) {
@@ -76,13 +100,7 @@ void mc_report_fact_kind(const char *file,
     if (g_dbctx && kind && symbol) {
         char details_buf[256];
 
-        if (msg && msg[0] != '\0') {
-            snprintf(details_buf, sizeof(details_buf),
-                     "col %u: %s", column, msg);
-        } else {
-            snprintf(details_buf, sizeof(details_buf),
-                     "col %u", column);
-        }
+        fact_details(details_buf, sizeof(details_buf), file, column, msg);
 
         mc_db_log_fact(g_dbctx,
                        &g_dbrun,
@@ -103,7 +121,7 @@ void mc_report_issue(const char *file,
 {
     if (mc_suppress_check(file, "return_value_check"))
         return;
-    if (mc_inline_suppress_check(line))
+    if (in_main_file(file) && mc_inline_suppress_check(line))
         return;
 
     if (!quiet) {
@@ -122,13 +140,7 @@ void mc_report_issue(const char *file,
     if (g_dbctx && func_name) {
         char details_buf[256];
 
-        if (msg && msg[0] != '\0') {
-            snprintf(details_buf, sizeof(details_buf),
-                     "col %u: %s", column, msg);
-        } else {
-            snprintf(details_buf, sizeof(details_buf),
-                     "col %u", column);
-        }
+        fact_details(details_buf, sizeof(details_buf), file, column, msg);
 
         mc_db_log_fact(g_dbctx,
                        &g_dbrun,

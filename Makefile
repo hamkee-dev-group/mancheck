@@ -10,7 +10,7 @@
 #   specdb   – build specdb library and specdb-build binary only
 #   analyzer – build analyzer only (requires specdb built first)
 
-.PHONY: all specdb analyzer test clean
+.PHONY: all specdb analyzer test test-sanitize clean
 
 all: specdb analyzer
 
@@ -21,7 +21,11 @@ analyzer: specdb
 	$(MAKE) -C analyzer
 
 test: all
+	python3 mc_tests/regressions.py
 	bash mc_tests/run.sh
+
+test-sanitize:
+	bash mc_tests/sanitizers.sh
 
 clean:
 	$(MAKE) -C specdb clean

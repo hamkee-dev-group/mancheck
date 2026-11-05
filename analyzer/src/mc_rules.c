@@ -7,9 +7,8 @@
 
 /*
  * Static baseline rules.
- * The rest of the analyzer only calls mc_rules_lookup().
- * When specdb is loaded, functions not in this table are checked
- * against manpage data for RETVAL_MUST_CHECK inference.
+ * Reviewed contracts below can clear infallible-return warnings and add
+ * failure/resource/format semantics. Unknown APIs may be augmented from specdb.
  */
 
 static const mc_func_rule mc_rules[] = {
@@ -195,35 +194,24 @@ static const mc_func_rule mc_rules[] = {
     { "vasprintf",     MC_FUNC_RULE_FORMAT_STRING | MC_FUNC_RULE_RETVAL_MUST_CHECK }
 };
 
-/* =====================================================================
- * specdb integration: optional fallback for RETVAL_MUST_CHECK
- * ===================================================================== */
 
-static sqlite3 *g_specdb = NULL;
-
-/* Simple per-process cache of specdb-derived rules.
- * Entries have dynamically allocated names.
- * A flags value of 0 means "looked up but not interesting" (negative cache). */
-struct specdb_cache_entry {
-    char     *name;
-    unsigned  flags;
+/* Stable entries: callers may retain a contract while another lookup runs. */
+static sqlite3 *g_specdb;
+static int g_error;
+struct cache_entry {
+    struct cache_entry *next;
+    mc_func_rule rule;
+    struct specdb_contract contract;
 };
-
-static struct specdb_cache_entry *g_cache = NULL;
-static size_t g_cache_len = 0;
-static size_t g_cache_cap = 0;
-
-/* Sentinel rule returned for specdb-derived matches. */
-static mc_func_rule g_specdb_rule;
+static struct cache_entry *g_cache;
 
 int mc_rules_init_specdb(const char *path)
 {
-    if (!path)
-        return 0;
-
-    if (specdb_open(path, &g_specdb) != 0) {
-        fprintf(stderr, "mc_rules: cannot open specdb '%s'\n", path);
-        g_specdb = NULL;
+    mc_rules_close_specdb();
+    g_error = 0;
+    if (!path) return 0;
+    if (specdb_open_readonly(path, &g_specdb)) {
+        fprintf(stderr, "mc_rules: cannot read populated specdb '%s'\n", path);
         return -1;
     }
     return 0;
@@ -231,93 +219,61 @@ int mc_rules_init_specdb(const char *path)
 
 void mc_rules_close_specdb(void)
 {
-    if (g_specdb) {
-        specdb_close(g_specdb);
-        g_specdb = NULL;
+    if (g_specdb) specdb_close(g_specdb);
+    g_specdb = NULL;
+    while (g_cache) {
+        struct cache_entry *next = g_cache->next;
+        free((char *)g_cache->rule.name);
+        free(g_cache);
+        g_cache = next;
     }
-    for (size_t i = 0; i < g_cache_len; i++)
-        free(g_cache[i].name);
-    free(g_cache);
-    g_cache = NULL;
-    g_cache_len = 0;
-    g_cache_cap = 0;
 }
 
-static const mc_func_rule *specdb_lookup(const char *name)
+int mc_rules_had_error(void) { return g_error; }
+
+static struct cache_entry *lookup(const char *name)
 {
-    if (!g_specdb)
-        return NULL;
-
-    /* Check cache first */
-    for (size_t i = 0; i < g_cache_len; i++) {
-        if (strcmp(name, g_cache[i].name) == 0) {
-            if (g_cache[i].flags == 0)
-                return NULL;  /* negative cache hit */
-            g_specdb_rule.name  = g_cache[i].name;
-            g_specdb_rule.flags = g_cache[i].flags;
-            return &g_specdb_rule;
-        }
+    for (struct cache_entry *p = g_cache; p; p = p->next)
+        if (!strcmp(p->rule.name, name)) return p;
+    struct cache_entry *p = calloc(1, sizeof *p);
+    if (!p) { g_error = 1; return NULL; }
+    p->rule.name = strdup(name);
+    if (!p->rule.name) { free(p); g_error = 1; return NULL; }
+    for (size_t i = 0; i < sizeof mc_rules / sizeof mc_rules[0]; i++)
+        if (!strcmp(name, mc_rules[i].name)) p->rule.flags = mc_rules[i].flags;
+    int builtin = specdb_builtin_contract(name, &p->contract);
+    if (g_specdb) {
+        struct specdb_contract inferred;
+        int rc = specdb_lookup_contract(g_specdb, name, &inferred);
+        if (rc < 0) g_error = 1;
+        else if (rc && !builtin) p->contract = inferred;
     }
-
-    /* Query specdb for all three flag types */
-    unsigned flags = 0;
-
-    int has_rv = specdb_function_has_retval(g_specdb, name);
-    if (has_rv == 1)
-        flags |= MC_FUNC_RULE_RETVAL_MUST_CHECK;
-
-    int is_dangerous = specdb_function_is_dangerous(g_specdb, name);
-    if (is_dangerous == 1)
-        flags |= MC_FUNC_RULE_DANGEROUS;
-
-    int has_fmt = specdb_function_has_format_string(g_specdb, name);
-    if (has_fmt == 1)
-        flags |= MC_FUNC_RULE_FORMAT_STRING;
-
-    /* Add to cache */
-    if (g_cache_len == g_cache_cap) {
-        size_t newcap = g_cache_cap ? g_cache_cap * 2 : 64;
-        struct specdb_cache_entry *tmp =
-            realloc(g_cache, newcap * sizeof(*tmp));
-        if (!tmp)
-            return NULL;
-        g_cache = tmp;
-        g_cache_cap = newcap;
-    }
-
-    char *dup = strdup(name);
-    if (!dup)
-        return NULL;
-
-    g_cache[g_cache_len].name  = dup;
-    g_cache[g_cache_len].flags = flags;
-    g_cache_len++;
-
-    if (flags == 0)
-        return NULL;
-
-    g_specdb_rule.name  = dup;
-    g_specdb_rule.flags = flags;
-    return &g_specdb_rule;
+    if (p->contract.failure == SPECDB_FAILURE_NONE)
+        p->rule.flags &= ~MC_FUNC_RULE_RETVAL_MUST_CHECK;
+    else if (p->contract.failure != SPECDB_FAILURE_UNKNOWN)
+        p->rule.flags |= MC_FUNC_RULE_RETVAL_MUST_CHECK;
+    if (p->contract.format_index >= 0) p->rule.flags |= MC_FUNC_RULE_FORMAT_STRING;
+    if (p->contract.dangerous) p->rule.flags |= MC_FUNC_RULE_DANGEROUS;
+    p->next = g_cache; g_cache = p;
+    return p;
 }
 
-/* ===================================================================== */
-
-const mc_func_rule *mc_rules_lookup(const char *name) {
-    size_t count = sizeof(mc_rules) / sizeof(mc_rules[0]);
-    for (size_t i = 0; i < count; i++) {
-        if (strcmp(name, mc_rules[i].name) == 0)
-            return &mc_rules[i];
-    }
-    return specdb_lookup(name);
+const mc_func_rule *mc_rules_lookup(const char *name)
+{
+    struct cache_entry *p = lookup(name);
+    return p && p->rule.flags ? &p->rule : NULL;
 }
 
-const char *mc_rules_category(unsigned flags) {
-    if (flags & MC_FUNC_RULE_DANGEROUS)
-        return "dangerous_function";
-    if (flags & MC_FUNC_RULE_FORMAT_STRING)
-        return "format_string";
-    if (flags & MC_FUNC_RULE_RETVAL_MUST_CHECK)
-        return "return_value_check";
+const struct specdb_contract *mc_rules_contract(const char *name)
+{
+    struct cache_entry *p = lookup(name);
+    return p ? &p->contract : NULL;
+}
+
+const char *mc_rules_category(unsigned flags)
+{
+    if (flags & MC_FUNC_RULE_DANGEROUS) return "dangerous_function";
+    if (flags & MC_FUNC_RULE_FORMAT_STRING) return "format_string";
+    if (flags & MC_FUNC_RULE_RETVAL_MUST_CHECK) return "return_value_check";
     return "other";
 }

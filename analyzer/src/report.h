@@ -9,6 +9,10 @@ void mc_report_set_gcc_mode(int enabled);
 /* Set the current DB context + run for subsequent reports. */
 void mc_report_set_db(mc_db_ctx *ctx, mc_db_run *run);
 
+/* File whose inline suppression markers are active; findings in other files
+ * (project headers) are not matched against them. */
+void mc_report_set_main_file(const char *path);
+
 /* Reset, increment, and query per-run issue counters (for runs.error_count). */
 void mc_report_reset_run_counters(void);
 void mc_report_count_issue(void);

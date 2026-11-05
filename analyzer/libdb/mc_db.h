@@ -15,14 +15,16 @@ int mc_db_open(mc_db *m, const char *path);
 /* Close database (safe to call on already-closed) */
 void mc_db_close(mc_db *m);
 
-/* Ensure schema exists (tables, triggers, FTS) */
+/* Create, validate or upgrade the schema (tables, triggers, FTS) in one
+ * transaction. Fails for foreign or newer-version databases. */
 int mc_db_init_schema(mc_db *m);
 
 /* Start a new analysis run, returns run_id via out param */
 int mc_db_begin_run(mc_db *m, const char *filename, long *run_id);
 
-/* Finish a run, updating error_count */
-int mc_db_end_run(mc_db *m, long run_id, int error_count);
+/* Finish a run: store error_count and mark it completed (completed != 0)
+ * or failed. Runs never finished stay 'started'. */
+int mc_db_end_run(mc_db *m, long run_id, int error_count, int completed);
 
 /* Insert a fact (warning, call, pattern, error, etc.) */
 int mc_db_insert_fact(mc_db *m,
